@@ -34,6 +34,10 @@
 #include <fmt/format.h>
 #include <tracy/Tracy.hpp>
 
+namespace aurora::gx {
+void clear_shader_module_cache();
+}
+
 namespace aurora::gfx {
 static Module Log("aurora::gfx::pipeline_cache");
 
@@ -339,16 +343,23 @@ static std::atomic_ref createdPipelines{detail::resources().stats.createdPipelin
 #else
 struct AtomicStatRef {
   uint32_t& ref;
+
   uint32_t operator++() { return __atomic_add_fetch(&ref, 1, __ATOMIC_RELAXED); }
+
   uint32_t operator--() { return __atomic_sub_fetch(&ref, 1, __ATOMIC_RELAXED); }
+
   uint32_t operator++(int) { return __atomic_fetch_add(&ref, 1, __ATOMIC_RELAXED); }
+
   uint32_t operator--(int) { return __atomic_fetch_sub(&ref, 1, __ATOMIC_RELAXED); }
+
   uint32_t operator+=(uint32_t val) { return __atomic_add_fetch(&ref, val, __ATOMIC_RELAXED); }
+
   uint32_t operator=(uint32_t val) {
     __atomic_store_n(&ref, val, __ATOMIC_RELAXED);
     return val;
   }
 };
+
 static AtomicStatRef queuedPipelines{detail::resources().stats.queuedPipelines};
 static AtomicStatRef createdPipelines{detail::resources().stats.createdPipelines};
 #endif
@@ -960,7 +971,7 @@ static void pipeline_cache_writer() {
 
 static void pipeline_worker() {
 #ifdef TRACY_ENABLE
-	tracy::SetThreadName("Pipeline compilation thread");
+  tracy::SetThreadName("Pipeline compilation thread");
 #endif
 
   bool hasMore = false;
@@ -1145,16 +1156,16 @@ void initialize_pipeline_cache() {
   g_pipelineThreadEnd = false;
   g_gpuCachePrunePending = false;
 
-	if (webgpu::g_backendType == wgpu::BackendType::WebGPU) {
-		g_hasPipelineThread = false;
-	} else {
-		g_hasPipelineThread = true;
-		const auto workerCount = std::clamp(std::thread::hardware_concurrency() / 2, 1u, 4u);
+  if (webgpu::g_backendType == wgpu::BackendType::WebGPU) {
+    g_hasPipelineThread = false;
+  } else {
+    g_hasPipelineThread = true;
+    const auto workerCount = std::clamp(std::thread::hardware_concurrency() / 2, 1u, 4u);
 
-		for (unsigned int i = 0; i < workerCount; ++i) {
-			g_pipelineThreads.emplace_back(pipeline_worker);
-		}
-	}
+    for (unsigned int i = 0; i < workerCount; ++i) {
+      g_pipelineThreads.emplace_back(pipeline_worker);
+    }
+  }
 
   const size_t loadedCount = load_pipeline_cache();
   rebuild_pipeline_cache();
@@ -1168,17 +1179,18 @@ void initialize_pipeline_cache() {
 }
 
 void shutdown_pipeline_cache() {
-	if (g_hasPipelineThread) {
-		g_pipelineThreadEnd = true;
-		g_pipelineQueueCv.notify_all();
-		g_pipelineReadyCv.notify_all();
+  if (g_hasPipelineThread) {
+    g_pipelineThreadEnd = true;
+    g_pipelineQueueCv.notify_all();
+    g_pipelineReadyCv.notify_all();
 
-		for (auto& worker : g_pipelineThreads) {
-			worker.join();
-		}
+    for (auto& worker : g_pipelineThreads) {
+      worker.join();
+    }
 
-		g_pipelineThreads.clear();
-	}
+    g_pipelineThreads.clear();
+  }
+  gx::clear_shader_module_cache();
   g_hasPipelineThread = false;
 
   stop_pipeline_cache_writer();

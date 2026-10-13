@@ -16,7 +16,7 @@ namespace aurora::rmlui {
 
 struct MaskSnapshot;
 
-inline constexpr bool EnableMsaa = false;
+inline constexpr bool EnableMsaa = true;
 inline constexpr uint32_t LayerSampleCount = EnableMsaa ? 4 : 1;
 inline constexpr uint32_t MaxBlurRadius = 3;
 inline constexpr size_t MaxGradientStops = 16;
@@ -197,7 +197,8 @@ public:
   void ReleaseGeometry(Rml::CompiledGeometryHandle geometry) override;
   Rml::TextureHandle LoadTexture(Rml::Vector2i& dimensions, const Rml::String& source) override;
   Rml::TextureHandle GenerateTexture(Rml::Span<const Rml::byte> source, Rml::Vector2i source_dimensions) override;
-  Rml::TextureHandle GenerateTexture(Rml::Span<const Rml::byte> source, Rml::Vector2i source_dimensions, uint32_t mipmapLevels);
+  Rml::TextureHandle GenerateTexture(Rml::Span<const Rml::byte> source, Rml::Vector2i source_dimensions,
+                                     uint32_t mipmapLevels);
   void ReleaseTexture(Rml::TextureHandle texture) override;
   void EnableScissorRegion(bool enable) override;
   void SetScissorRegion(Rml::Rectanglei region) override;

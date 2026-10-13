@@ -35,9 +35,7 @@ constexpr int CACHE_SCHEMA = 2;
 // % of rows pruned to trigger a full VACUUM
 constexpr uint64_t VacuumPrunePercentThreshold = 25;
 
-static std::filesystem::path cache_path() {
-  return io::fs_path_from_string(g_config.cachePath) / "dawn_cache.db";
-}
+static std::filesystem::path cache_path() { return io::fs_path_from_string(g_config.cachePath) / "dawn_cache.db"; }
 
 static void init_abort() {
   cache_broken = true;
@@ -55,12 +53,14 @@ static int check(int ret) {
 
 static bool ensure_schema_up_to_date() {
   sqlite::Transaction tx(db, Log, true);
+
   if (!tx) {
     Log.error("Failed to open schema check transaction", sqlite3_errmsg(db));
     return false;
   }
 
   auto ret = sqlite::exec(db, "CREATE TABLE IF NOT EXISTS aurora_schema(value INTEGER);");
+
   if (ret != SQLITE_OK) {
     Log.error("Failed to create schema table: {}", sqlite3_errmsg(db));
     return false;
@@ -69,6 +69,7 @@ static bool ensure_schema_up_to_date() {
   bool match = false;
   auto cmd = fmt::format("SELECT * FROM aurora_schema WHERE value = {}", CACHE_SCHEMA);
   ret = sqlite::exec(db, cmd.c_str(), [&match](int, char**, char**) { match = true; }, nullptr);
+
   if (ret != SQLITE_OK) {
     Log.error("Failed to check schema table: {}", sqlite3_errmsg(db));
     return false;
@@ -90,6 +91,7 @@ DELETE FROM aurora_schema;
 INSERT INTO aurora_schema VALUES ({});)",
       CACHE_SCHEMA);
   ret = sqlite::exec(db, cmd.c_str());
+
   if (ret != SQLITE_OK) {
     Log.error("Failed to update schema: {}", sqlite3_errmsg(db));
     return false;
@@ -105,13 +107,32 @@ static bool cache_init_core() {
   std::string file = io::fs_path_to_string(cache_path());
   Log.debug("Using dawn cache at {}", file);
   auto ret = sqlite3_open(file.c_str(), &db);
+
   if (ret != SQLITE_OK) {
     Log.error("Failed to open database: {}", sqlite3_errmsg(db));
     return false;
   }
 
+  // Do not pass sizes or shader blobs from a damaged database to Dawn.
+  sqlite3_stmt* integrity = nullptr;
+  bool healthy = sqlite3_prepare_v2(db, "PRAGMA quick_check", -1, &integrity, nullptr) == SQLITE_OK;
+
+  if (healthy) {
+    healthy = sqlite3_step(integrity) == SQLITE_ROW;
+    const auto* message = healthy ? sqlite3_column_text(integrity, 0) : nullptr;
+    healthy = message && std::strcmp(reinterpret_cast<const char*>(message), "ok") == 0;
+  }
+
+  sqlite3_finalize(integrity);
+
+  if (!healthy) {
+    Log.warn("Ignoring damaged shader cache; shaders will be compiled normally");
+    return false;
+  }
+
   // WAL mode + NORMAL = no need for disk syncs, consistent but not durable is fine.
   ret = sqlite::exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+
   if (ret != SQLITE_OK) {
     Log.error("Failed to set pragmas: {}", sqlite3_errmsg(db));
     return false;
@@ -124,6 +145,7 @@ static bool cache_init_core() {
 
   ret = sqlite3_prepare_v3(db, "SELECT value, size, compressed FROM cache WHERE key = ?", -1, SQLITE_PREPARE_PERSISTENT,
                            &load_stmt, nullptr);
+
   if (ret != SQLITE_OK) {
     Log.error("Failed to prepare statement: {}", sqlite3_errmsg(db));
     return false;
@@ -131,6 +153,7 @@ static bool cache_init_core() {
 
   ret = sqlite3_prepare_v3(db, "REPLACE INTO cache (key, value, size, compressed) VALUES (?, ?, ?, ?)", -1,
                            SQLITE_PREPARE_PERSISTENT, &store_stmt, nullptr);
+
   if (ret != SQLITE_OK) {
     Log.error("Failed to prepare statement: {}", sqlite3_errmsg(db));
     return false;
@@ -142,6 +165,7 @@ static bool cache_init_core() {
 static std::optional<uint64_t> select_uint64(const char* sql) {
   sqlite3_stmt* stmt = nullptr;
   auto ret = sqlite3_prepare_v3(db, sql, -1, 0, &stmt, nullptr);
+
   if (ret != SQLITE_OK) {
     Log.error("Failed to prepare statement '{}': {}", sql, sqlite3_errmsg(db));
     return std::nullopt;
@@ -149,6 +173,7 @@ static std::optional<uint64_t> select_uint64(const char* sql) {
 
   std::optional<uint64_t> result;
   ret = sqlite3_step(stmt);
+
   if (ret == SQLITE_ROW) {
     result = static_cast<uint64_t>(sqlite3_column_int64(stmt, 0));
   } else if (ret != SQLITE_DONE) {
@@ -165,6 +190,7 @@ static bool fill_used_key_table(const std::vector<XXH128_hash_t>& usedKeys) {
                           "key BLOB PRIMARY KEY NOT NULL"
                           ");"
                           "DELETE FROM cache_keys_used;");
+
   if (ret != SQLITE_OK) {
     Log.error("Failed to prepare dawn cache prune key table: {}", sqlite3_errmsg(db));
     return false;
@@ -172,6 +198,7 @@ static bool fill_used_key_table(const std::vector<XXH128_hash_t>& usedKeys) {
 
   sqlite3_stmt* stmt = nullptr;
   ret = sqlite3_prepare_v3(db, "INSERT OR IGNORE INTO cache_keys_used (key) VALUES (?)", -1, 0, &stmt, nullptr);
+
   if (ret != SQLITE_OK) {
     Log.error("Failed to prepare dawn cache prune key insert: {}", sqlite3_errmsg(db));
     return false;
@@ -179,6 +206,7 @@ static bool fill_used_key_table(const std::vector<XXH128_hash_t>& usedKeys) {
 
   for (const auto& keyHash : usedKeys) {
     ret = sqlite3_bind_blob(stmt, 1, &keyHash, sizeof(keyHash), SQLITE_TRANSIENT);
+
     if (ret != SQLITE_OK) {
       Log.error("Failed to bind dawn cache prune key: {}", sqlite3_errmsg(db));
       sqlite3_finalize(stmt);
@@ -186,6 +214,7 @@ static bool fill_used_key_table(const std::vector<XXH128_hash_t>& usedKeys) {
     }
 
     ret = sqlite3_step(stmt);
+
     if (ret != SQLITE_DONE) {
       Log.error("Failed to insert dawn cache prune key: {}", sqlite3_errmsg(db));
       sqlite3_finalize(stmt);
@@ -228,6 +257,7 @@ size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valu
   }
 
   sqlite::Transaction tx(db, Log);
+
   if (!tx) {
     Log.error("Failed to open load transaction");
     return 0;
@@ -239,18 +269,42 @@ size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valu
   const auto ret = sqlite3_step(load_stmt);
   size_t foundSize;
   bool loadSucceeded = false;
+
   if (ret == SQLITE_ROW) {
     // Hit
     const auto foundPtr = sqlite3_column_blob(load_stmt, 0);
     foundSize = sqlite3_column_int64(load_stmt, 1);
     const bool compressed = sqlite3_column_int(load_stmt, 2) != 0;
+    const auto blobSize = sqlite3_column_bytes(load_stmt, 0);
+    bool validEntry = foundPtr && foundSize > 0 && foundSize <= 256u * 1024u * 1024u;
+
+    if (!compressed) {
+      validEntry = validEntry && foundSize == static_cast<size_t>(blobSize);
+    }
+#if defined(AURORA_CACHE_USE_ZSTD)
+    else {
+      const auto decodedSize = ZSTD_getFrameContentSize(foundPtr, blobSize);
+      validEntry = validEntry && decodedSize == foundSize;
+    }
+#else
+    else {
+      validEntry = false;
+    }
+#endif
+    if (!validEntry) {
+      Log.warn("Ignoring invalid shader cache entry");
+      sqlite3_reset(load_stmt);
+      return 0;
+    }
 
     if (value && valueSize == foundSize) {
       loadSucceeded = true;
+
       if (compressed) {
 #if defined(AURORA_CACHE_USE_ZSTD)
         const auto compSize = sqlite3_column_bytes(load_stmt, 0);
         const auto zstdRet = ZSTD_decompress(value, valueSize, foundPtr, compSize);
+
         if (ZSTD_isError(zstdRet)) {
           Log.error("zstd decompression error: {}", ZSTD_getErrorName(zstdRet));
           foundSize = 0;
@@ -280,6 +334,8 @@ size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valu
     foundSize = 0;
   } else {
     Log.error("Looking up cache key failed: {}", sqlite3_errmsg(db));
+    sqlite3_reset(load_stmt);
+    cache_broken = true;
     return 0;
   }
 
@@ -300,6 +356,7 @@ void store_to_cache(void const* key, size_t keySize, void const* value, size_t v
   }
 
   sqlite::Transaction tx(db, Log, true);
+
   if (!tx) {
     Log.error("Failed to open store transaction");
     return;
@@ -310,6 +367,7 @@ void store_to_cache(void const* key, size_t keySize, void const* value, size_t v
   int compressed = 0;
 #if defined(AURORA_CACHE_USE_ZSTD)
   const auto bound = ZSTD_compressBound(valueSize);
+
   if (ZSTD_isError(bound)) {
     Log.error("Failed to calculate ZSTD_compressBound: {}", ZSTD_getErrorName(bound));
     return;
@@ -320,6 +378,7 @@ void store_to_cache(void const* key, size_t keySize, void const* value, size_t v
   }
 
   const auto compressRet = ZSTD_compress(compress_buffer.data(), compress_buffer.size(), value, valueSize, 0);
+
   if (ZSTD_isError(compressRet)) {
     Log.error("ZSTD compression error: {}", ZSTD_getErrorName(compressRet));
     return;
@@ -340,6 +399,7 @@ void store_to_cache(void const* key, size_t keySize, void const* value, size_t v
   check(sqlite3_bind_int(store_stmt, 4, compressed));
 
   const auto ret = sqlite3_step(store_stmt);
+
   if (ret != SQLITE_DONE) {
     // Error or something
     Log.error("Failed to insert row: {}", sqlite3_errmsg(db));
@@ -356,9 +416,11 @@ void store_to_cache(void const* key, size_t keySize, void const* value, size_t v
 
 void cache_prune() {
   std::lock_guard lock(cache_mutex);
+
   if (!cache_init()) {
     return;
   }
+
   if (cache_keys_used.empty()) {
     Log.warn("Skipping Dawn cache prune because no cache keys were used");
     return;
@@ -368,6 +430,7 @@ void cache_prune() {
   sqlite3_int64 deletedRows = 0;
   {
     sqlite::Transaction tx(db, Log, true);
+
     if (!tx) {
       Log.error("Failed to open dawn cache prune transaction");
       return;
@@ -378,9 +441,11 @@ void cache_prune() {
     }
 
     const auto totalRowsResult = select_uint64("SELECT COUNT(*) FROM cache");
+
     if (!totalRowsResult) {
       return;
     }
+
     totalRows = *totalRowsResult;
 
     const auto ret = sqlite::exec(db,
@@ -388,10 +453,12 @@ void cache_prune() {
                                   "WHERE NOT EXISTS ("
                                   "  SELECT 1 FROM cache_keys_used WHERE cache_keys_used.key = cache.key"
                                   ")");
+
     if (ret != SQLITE_OK) {
       Log.error("Failed to prune dawn cache rows: {}", sqlite3_errmsg(db));
       return;
     }
+
     deletedRows = sqlite3_changes64(db);
 
     tx.commit();
@@ -422,14 +489,17 @@ void cache_shutdown() {
   compress_buffer.clear();
 #endif
   cache_keys_used.clear();
+
   if (load_stmt != nullptr) {
     check(sqlite3_finalize(load_stmt));
     load_stmt = nullptr;
   }
+
   if (store_stmt != nullptr) {
     check(sqlite3_finalize(store_stmt));
     store_stmt = nullptr;
   }
+
   if (db != nullptr) {
     check(sqlite3_close(db));
     db = nullptr;

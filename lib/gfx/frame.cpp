@@ -1,3 +1,4 @@
+#include <condition_variable>
 #include "frame.hpp"
 
 #include "pipeline_cache.hpp"
@@ -42,6 +43,18 @@ namespace {
 constexpr Module Log{"aurora::gfx"};
 
 Resources g_resources;
+std::mutex g_progressMutex;
+std::condition_variable g_progressChanged;
+uint64_t g_progressGeneration = 0;
+
+void notify_gpu_progress() {
+  {
+    std::lock_guard lock{g_progressMutex};
+    ++g_progressGeneration;
+  }
+
+  g_progressChanged.notify_all();
+}
 
 enum class BufferMapState {
   Unmapped,
@@ -74,7 +87,9 @@ struct RuntimeEncoderTaskType {
 };
 
 constexpr uint32_t draw_type_index(DrawTypeId id) { return static_cast<uint32_t>(id & 0xFFFFFFFFu); }
+
 constexpr uint32_t draw_type_generation(DrawTypeId id) { return static_cast<uint32_t>(id >> 32); }
+
 constexpr DrawTypeId make_draw_type_id(uint32_t index, uint32_t generation) {
   return static_cast<DrawTypeId>(generation) << 32 | index;
 }
@@ -88,26 +103,34 @@ std::mutex g_runtimeTypeMutex;
 // Requires g_runtimeTypeMutex held.
 const RuntimeDrawType* find_runtime_draw_type_locked(DrawTypeId id) {
   const auto idx = draw_type_index(id);
+
   if (id == InvalidDrawType || idx >= g_runtimeDrawTypes.size()) {
     return nullptr;
   }
+
   const auto& slot = g_runtimeDrawTypes[idx];
+
   if (slot.generation != draw_type_generation(id) || slot.draw == nullptr) {
     return nullptr;
   }
+
   return &slot;
 }
 
 // Requires g_runtimeTypeMutex held.
 const RuntimeEncoderTaskType* find_runtime_encoder_task_type_locked(EncoderTaskId id) {
   const auto idx = draw_type_index(id);
+
   if (id == InvalidEncoderTask || idx >= g_runtimeEncoderTaskTypes.size()) {
     return nullptr;
   }
+
   const auto& slot = g_runtimeEncoderTaskTypes[idx];
+
   if (slot.generation != draw_type_generation(id) || slot.callback == nullptr) {
     return nullptr;
   }
+
   return &slot;
 }
 
@@ -138,8 +161,10 @@ void update_ema(std::atomic_int64_t& value, int64_t sample) {
   }
 
   int64_t current = value.load(std::memory_order_acquire);
+
   while (true) {
     const int64_t next = current == 0 ? sample : current + (sample - current) / static_cast<int64_t>(PacingEmaWeight);
+
     if (value.compare_exchange_weak(current, next, std::memory_order_acq_rel, std::memory_order_acquire)) {
       return;
     }
@@ -154,6 +179,7 @@ void prune_present_times(PresentClock::time_point now) {
 
 void process_events() {
   ZoneScopedN("ProcessEvents");
+
   if (g_instance) {
     g_instance.ProcessEvents();
   }
@@ -166,6 +192,7 @@ void enqueue_process_events() {
   }
 
   bool expected = false;
+
   if (!g_processEventsQueued.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
                                                      std::memory_order_acquire)) {
     return;
@@ -178,14 +205,23 @@ void enqueue_process_events() {
 }
 
 void wait_for_gpu_progress(std::chrono::nanoseconds sleepDuration) {
+  uint64_t generation;
+  {
+    std::lock_guard lock{g_progressMutex};
+    generation = g_progressGeneration;
+  }
+
   if (render_worker::is_idle()) {
     enqueue_process_events();
   }
-  std::this_thread::sleep_for(sleepDuration);
+
+  std::unique_lock lock{g_progressMutex};
+  g_progressChanged.wait_for(lock, sleepDuration, [&] { return generation != g_progressGeneration; });
 }
 
 void pace_frame_start() {
   ZoneScopedN("Frame start pacing");
+
   if (g_frameSlots.free_count() == FrameSlotCount) {
     return;
   }
@@ -193,6 +229,7 @@ void pace_frame_start() {
   const int64_t lastPresentNs = g_lastPresentNs.load(std::memory_order_acquire);
   const int64_t presentPeriodNs = g_presentPeriodNs.load(std::memory_order_acquire);
   const int64_t cpuFrameTimeNs = g_cpuFrameTimeNs.load(std::memory_order_acquire);
+
   if (lastPresentNs == 0 || presentPeriodNs == 0 || cpuFrameTimeNs == 0) {
     return;
   }
@@ -200,12 +237,14 @@ void pace_frame_start() {
   const int64_t safetyMarginNs = duration_ns(FrameStartSafetyMargin);
   const int64_t targetStartNs = lastPresentNs + presentPeriodNs - cpuFrameTimeNs - safetyMarginNs;
   int64_t nowNs = timestamp_ns(PresentClock::now());
+
   if (targetStartNs <= nowNs) {
     return;
   }
 
   const double initialWaitMs = static_cast<double>(targetStartNs - nowNs) / 1'000'000.0;
   TracyPlot("aurora: frameStartPaceWaitMs", initialWaitMs);
+
   while (nowNs < targetStartNs) {
     const int64_t remainingNs = targetStartNs - nowNs;
     const auto sleepDuration =
@@ -217,6 +256,7 @@ void pace_frame_start() {
 
 void map_staging_buffer(size_t slot, bool releaseSlotOnCompletion = false) {
   auto expected = BufferMapState::Unmapped;
+
   if (!g_mappingStates[slot].compare_exchange_strong(expected, BufferMapState::Mapping, std::memory_order_acq_rel,
                                                      std::memory_order_acquire)) {
     return;
@@ -228,17 +268,22 @@ void map_staging_buffer(size_t slot, bool releaseSlotOnCompletion = false) {
         if (status == wgpu::MapAsyncStatus::CallbackCancelled || status == wgpu::MapAsyncStatus::Aborted) {
           Log.warn("Buffer mapping {}: {}", magic_enum::enum_name(status), message);
           g_mappingStates[slot].store(BufferMapState::Unmapped, std::memory_order_release);
+
           if (releaseSlotOnCompletion) {
             g_stagingSlots.release(slot);
           }
+          notify_gpu_progress();
           return;
         }
+
         AURORA_ASSERT(status == wgpu::MapAsyncStatus::Success, "Buffer mapping failed: {} {}",
                       magic_enum::enum_name(status), message);
         g_mappingStates[slot].store(BufferMapState::Mapped, std::memory_order_release);
+
         if (releaseSlotOnCompletion) {
           g_stagingSlots.release(slot);
         }
+        notify_gpu_progress();
       });
 }
 } // namespace
@@ -252,18 +297,22 @@ const wgpu::Buffer& staging_buffer(size_t slot) { return g_stagingBuffers[slot];
 std::optional<RegisteredDrawType> find_runtime_draw_type(DrawTypeId id) {
   std::lock_guard lock{g_runtimeTypeMutex};
   const auto* slot = find_runtime_draw_type_locked(id);
+
   if (slot == nullptr) {
     return std::nullopt;
   }
+
   return RegisteredDrawType{.draw = slot->draw, .userdata = slot->userdata};
 }
 
 std::optional<RegisteredEncoderTaskType> find_runtime_encoder_task_type(EncoderTaskId id) {
   std::lock_guard lock{g_runtimeTypeMutex};
   const auto* slot = find_runtime_encoder_task_type_locked(id);
+
   if (slot == nullptr) {
     return std::nullopt;
   }
+
   return RegisteredEncoderTaskType{
       .callback = slot->callback,
       .userdata = slot->userdata,
@@ -317,6 +366,7 @@ DrawTypeId register_draw_type(const DrawTypeDescriptor& desc) {
 
   std::lock_guard lock{g_runtimeTypeMutex};
   uint32_t idx;
+
   if (!g_freeDrawTypeSlots.empty()) {
     idx = g_freeDrawTypeSlots.back();
     g_freeDrawTypeSlots.pop_back();
@@ -324,6 +374,7 @@ DrawTypeId register_draw_type(const DrawTypeDescriptor& desc) {
     idx = static_cast<uint32_t>(g_runtimeDrawTypes.size());
     g_runtimeDrawTypes.emplace_back();
   }
+
   auto& slot = g_runtimeDrawTypes[idx];
   slot.label = desc.label != nullptr ? desc.label : "";
   slot.draw = desc.draw;
@@ -333,9 +384,11 @@ DrawTypeId register_draw_type(const DrawTypeDescriptor& desc) {
 
 void unregister_draw_type(DrawTypeId type) noexcept {
   std::lock_guard lock{g_runtimeTypeMutex};
+
   if (find_runtime_draw_type_locked(type) == nullptr) {
     return;
   }
+
   const auto idx = draw_type_index(type);
   auto& slot = g_runtimeDrawTypes[idx];
   slot.label.clear();
@@ -353,6 +406,7 @@ EncoderTaskId register_encoder_task_type(const EncoderTaskDescriptor& desc) {
 
   std::lock_guard lock{g_runtimeTypeMutex};
   uint32_t idx;
+
   if (!g_freeEncoderTaskTypeSlots.empty()) {
     idx = g_freeEncoderTaskTypeSlots.back();
     g_freeEncoderTaskTypeSlots.pop_back();
@@ -360,6 +414,7 @@ EncoderTaskId register_encoder_task_type(const EncoderTaskDescriptor& desc) {
     idx = static_cast<uint32_t>(g_runtimeEncoderTaskTypes.size());
     g_runtimeEncoderTaskTypes.emplace_back();
   }
+
   auto& slot = g_runtimeEncoderTaskTypes[idx];
   slot.label = desc.label != nullptr ? desc.label : "";
   slot.callback = desc.callback;
@@ -370,9 +425,11 @@ EncoderTaskId register_encoder_task_type(const EncoderTaskDescriptor& desc) {
 
 void unregister_encoder_task_type(EncoderTaskId type) noexcept {
   std::lock_guard lock{g_runtimeTypeMutex};
+
   if (find_runtime_encoder_task_type_locked(type) == nullptr) {
     return;
   }
+
   const auto idx = draw_type_index(type);
   auto& slot = g_runtimeEncoderTaskTypes[idx];
   slot.label.clear();
@@ -394,6 +451,7 @@ void initialize() {
     std::lock_guard lock{g_presentStatsMutex};
     g_presentTimes.clear();
   }
+
   render_worker::initialize();
   // This appears to take a while and blocks the render thread for periods of time
   // render_worker::set_event_pump([] {
@@ -414,13 +472,16 @@ void initialize() {
     if (size <= 0) {
       return;
     }
+
     const wgpu::BufferDescriptor descriptor{
         .label = label,
         .usage = usage,
         .size = size,
     };
+
     out = g_device.CreateBuffer(&descriptor);
   };
+
   createBuffer(g_resources.uniformBuffer, wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst, UniformBufferSize,
                "Shared Uniform Buffer");
   createBuffer(g_resources.vertexBuffer,
@@ -430,14 +491,17 @@ void initialize() {
                "Shared Index Buffer");
   createBuffer(g_resources.storageBuffer, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, StorageBufferSize,
                "Shared Storage Buffer");
+
   for (size_t i = 0; i < g_stagingBuffers.size(); ++i) {
     const auto label = fmt::format("Staging Buffer {}", i);
     createBuffer(g_stagingBuffers[i], wgpu::BufferUsage::MapWrite | wgpu::BufferUsage::CopySrc, StagingBufferSize,
                  label.c_str());
   }
+
   for (auto& state : g_mappingStates) {
     state.store(BufferMapState::Unmapped, std::memory_order_release);
   }
+
   for (size_t slot = 0; slot < g_stagingBuffers.size(); ++slot) {
     map_staging_buffer(slot);
   }
@@ -463,11 +527,13 @@ void initialize() {
                 },
         },
     };
+
     const wgpu::BindGroupLayoutDescriptor layoutDesc{
         .label = "Static bind group layout",
         .entryCount = layoutEntries.size(),
         .entries = layoutEntries.data(),
     };
+
     g_resources.staticBindGroupLayout = g_device.CreateBindGroupLayout(&layoutDesc);
     const std::array entries{
         wgpu::BindGroupEntry{
@@ -479,12 +545,14 @@ void initialize() {
             .buffer = g_resources.storageBuffer,
         },
     };
+
     const wgpu::BindGroupDescriptor bindGroupDescriptor{
         .label = "Static bind group",
         .layout = g_resources.staticBindGroupLayout,
         .entryCount = entries.size(),
         .entries = entries.data(),
     };
+
     g_resources.staticBindGroup = g_device.CreateBindGroup(&bindGroupDescriptor);
   }
 
@@ -501,11 +569,13 @@ void initialize() {
                 },
         },
     };
+
     const wgpu::BindGroupLayoutDescriptor layoutDesc{
         .label = "Uniform bind group layout",
         .entryCount = layoutEntries.size(),
         .entries = layoutEntries.data(),
     };
+
     g_resources.uniformBindGroupLayout = g_device.CreateBindGroupLayout(&layoutDesc);
     const std::array entries{
         wgpu::BindGroupEntry{
@@ -514,12 +584,14 @@ void initialize() {
             .size = gx::MaxUniformSize,
         },
     };
+
     const wgpu::BindGroupDescriptor bindGroupDescriptor{
         .label = "Uniform bind group",
         .layout = g_resources.uniformBindGroupLayout,
         .entryCount = entries.size(),
         .entries = entries.data(),
     };
+
     g_resources.uniformBindGroup = g_device.CreateBindGroup(&bindGroupDescriptor);
   }
 
@@ -542,6 +614,7 @@ void shutdown() {
     std::lock_guard lock{g_presentStatsMutex};
     g_presentTimes.clear();
   }
+
   shutdown_pipeline_cache();
   color_peek::shutdown();
   depth_peek::shutdown();
@@ -562,14 +635,17 @@ void shutdown() {
     g_runtimeEncoderTaskTypes.clear();
     g_freeEncoderTaskTypeSlots.clear();
   }
+
   g_resources.vertexBuffer = {};
   g_resources.uniformBuffer = {};
   g_resources.indexBuffer = {};
   g_resources.storageBuffer = {};
   g_stagingBuffers.fill({});
+
   for (auto& packet : g_framePackets) {
     packet = {};
   }
+
   shutdown_recording();
   g_resources.staticBindGroup = {};
   g_resources.staticBindGroupLayout = {};
@@ -578,6 +654,7 @@ void shutdown() {
   g_frameIndex = UINT32_MAX;
   g_frameSlots.reset();
   g_stagingSlots.reset();
+
   for (auto& state : g_mappingStates) {
     state.store(BufferMapState::Unmapped, std::memory_order_release);
   }
@@ -586,14 +663,18 @@ void shutdown() {
 bool wait_for_staging_buffer(size_t slot) {
   ZoneScopedN("Wait for buffer map");
   map_staging_buffer(slot);
+
   while (true) {
     const auto mappingState = g_mappingStates[slot].load(std::memory_order_acquire);
+
     if (mappingState == BufferMapState::Mapped) {
       return true;
     }
+
     if (mappingState == BufferMapState::Unmapped) {
       return false;
     }
+
     wait_for_gpu_progress(std::chrono::milliseconds{1});
   }
 }
@@ -601,6 +682,7 @@ bool wait_for_staging_buffer(size_t slot) {
 size_t acquire_frame_slot() {
   ZoneScopedN("Acquire frame slot");
   const auto waitStart = PresentClock::now();
+
   while (true) {
     if (const auto slot = g_frameSlots.try_acquire()) {
       const auto waitDuration = PresentClock::now() - waitStart;
@@ -608,20 +690,24 @@ size_t acquire_frame_slot() {
       TracyPlot("aurora: frameSlotWaitMs", waitMs);
       return *slot;
     }
+
     wait_for_gpu_progress(std::chrono::microseconds{100});
   }
 }
 
 std::optional<size_t> acquire_mapped_staging_buffer() {
   ZoneScopedN("Acquire mapped staging buffer");
+
   while (true) {
     if (auto slot = g_stagingSlots.try_acquire()) {
       if (wait_for_staging_buffer(*slot)) {
         return *slot;
       }
+
       g_stagingSlots.release(*slot);
       return std::nullopt;
     }
+
     wait_for_gpu_progress(std::chrono::microseconds{100});
   }
 }
@@ -647,13 +733,16 @@ bool begin_frame() {
     if (size <= 0) {
       return;
     }
+
     buf = ByteBuffer{static_cast<u8*>(stagingBuf.GetMappedRange(bufferOffset, size)), static_cast<size_t>(size)};
     bufferOffset += size;
   };
+
   mapBuffer(frame.verts, VertexBufferSize);
   mapBuffer(frame.uniforms, UniformBufferSize);
   mapBuffer(frame.indices, IndexBufferSize);
   mapBuffer(frame.storage, StorageBufferSize);
+
   if constexpr (UseTextureBuffer) {
     mapBuffer(frame.textureUpload, TextureUploadSize);
   }
@@ -671,12 +760,14 @@ bool begin_frame() {
 
 void end_frame(EndFrameCallback callback) {
   ZoneScoped;
+
   if (g_cpuFrameStart.time_since_epoch().count() != 0) {
     const auto cpuFrameTime = PresentClock::now() - g_cpuFrameStart;
     update_ema(g_cpuFrameTimeNs, duration_ns(cpuFrameTime));
     const double cpuFrameTimeMs = std::chrono::duration<double, std::milli>{cpuFrameTime}.count();
     TracyPlot("aurora: cpuFrameTimeMs", cpuFrameTimeMs);
   }
+
   const auto recorded = end_recording();
   auto& frame = *recorded.packet;
   const size_t frameSlot = recorded.frameSlot;
@@ -700,10 +791,13 @@ void end_frame(EndFrameCallback callback) {
     g_resources.stats.lastIndexSize = stats.lastIndexSize;
     g_resources.stats.lastStorageSize = stats.lastStorageSize;
     g_resources.stats.lastTextureUploadSize = stats.lastTextureUploadSize;
+
     if (callback) {
       callback(encoder, std::move(afterSubmitCallbacks));
     }
+
     g_frameSlots.release(frameSlot);
+    notify_gpu_progress();
     expire_cached_bind_groups();
     map_staging_buffer(stagingSlot, true);
     process_events();
@@ -717,21 +811,24 @@ void gpu_synchronize() { render_worker::synchronize(); }
 void synchronize() { render_worker::synchronize(); }
 
 void wait_draw_sync() {
-	render_worker::synchronize();
-	while (!color_peek::is_idle()) {
-		wait_for_gpu_progress(std::chrono::milliseconds{1});
-	}
+  render_worker::synchronize();
+
+  while (!color_peek::is_idle()) {
+    wait_for_gpu_progress(std::chrono::milliseconds{1});
+  }
 }
 
 void after_present() noexcept {
   const auto now = PresentClock::now();
   const int64_t nowNs = timestamp_ns(now);
   const int64_t previousPresentNs = g_lastPresentNs.exchange(nowNs, std::memory_order_acq_rel);
+
   if (previousPresentNs != 0) {
     update_ema(g_presentPeriodNs, nowNs - previousPresentNs);
     const double presentPeriodMs = static_cast<double>(g_presentPeriodNs.load(std::memory_order_acquire)) / 1'000'000.0;
     TracyPlot("aurora: presentPeriodMs", presentPeriodMs);
   }
+
   std::lock_guard lock{g_presentStatsMutex};
   g_presentTimes.push_back(now);
   prune_present_times(now);
@@ -741,17 +838,21 @@ float calculate_fps() noexcept {
   const auto now = PresentClock::now();
   std::lock_guard lock{g_presentStatsMutex};
   prune_present_times(now);
+
   if (g_presentTimes.size() < 2) {
     return 0.f;
   }
 
   const auto elapsed = std::chrono::duration<float>(g_presentTimes.back() - g_presentTimes.front()).count();
+
   if (elapsed <= 0.f) {
     return 0.f;
   }
+
   return static_cast<float>(g_presentTimes.size() - 1) / elapsed;
 }
 } // namespace aurora::gfx
 
 const AuroraStats* aurora_get_stats() { return &aurora::gfx::detail::resources().stats; }
+
 float aurora_get_fps() { return aurora::gfx::calculate_fps(); }

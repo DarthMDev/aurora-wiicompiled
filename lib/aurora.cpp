@@ -52,6 +52,7 @@ uint32_t clamp_scissor_coord(double value, uint32_t maximum) noexcept {
   if (!std::isfinite(value)) {
     return 0;
   }
+
   return static_cast<uint32_t>(std::clamp(value, 0.0, static_cast<double>(maximum)));
 }
 
@@ -103,32 +104,39 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   g_config = config;
   Log.info("Aurora initializing");
   log_system_information();
+
   if (g_config.appName == nullptr) {
     g_config.appName = "Aurora";
   } else {
     g_config.appName = strdup(g_config.appName);
   }
+
   if (g_config.userPath == nullptr) {
     g_config.userPath = SDL_GetPrefPath(nullptr, g_config.appName);
   } else {
     g_config.userPath = strdup(g_config.userPath);
   }
+
   if (g_config.cachePath == nullptr) {
     g_config.cachePath = SDL_GetPrefPath(nullptr, g_config.appName);
   } else {
     g_config.cachePath = strdup(g_config.cachePath);
   }
+
   if (g_config.resourcesPath == nullptr) {
     g_config.resourcesPath = SDL_GetBasePath();
   } else {
     g_config.resourcesPath = strdup(g_config.resourcesPath);
   }
+
   if (g_config.msaa == 0) {
     g_config.msaa = 1;
   }
+
   if (g_config.maxTextureAnisotropy == 0) {
     g_config.maxTextureAnisotropy = 16;
   }
+
   AURORA_ASSERT(window::initialize(), "Error initializing window");
 
   if (!audio::initialize()) {
@@ -143,6 +151,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   /* Attempt to create a window using the calling application's desired backend */
   AuroraBackend selectedBackend = config.desiredBackend;
   bool windowCreated = false;
+
   if (selectedBackend != BACKEND_AUTO && window::create_window(selectedBackend)) {
     if (webgpu::initialize(selectedBackend, config.allowCpuAdapter)) {
       windowCreated = true;
@@ -154,9 +163,11 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   if (!windowCreated) {
     for (const auto backendType : PreferredBackendOrder) {
       selectedBackend = backendType;
+
       if (!window::create_window(selectedBackend)) {
         continue;
       }
+
       if (webgpu::initialize(selectedBackend, config.allowCpuAdapter)) {
         windowCreated = true;
         break;
@@ -195,6 +206,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   if (g_config.imGuiInitCallback != nullptr) {
     g_config.imGuiInitCallback(&size);
   }
+
   imgui::initialize();
 #endif
 
@@ -232,6 +244,7 @@ void shutdown() noexcept {
 
 const AuroraEvent* update() noexcept {
   ZoneScoped;
+
   if (g_initialFrame) {
     g_initialFrame = false;
     gamepad::initialize();
@@ -252,11 +265,14 @@ bool begin_frame() noexcept {
       webgpu::release_surface();
       return false;
     }
+
     if (window::is_paused()) {
       return false;
     }
+
     if (!g_surface) {
       webgpu::refresh_surface(true);
+
       if (!g_surface) {
         return false;
       }
@@ -264,10 +280,13 @@ bool begin_frame() noexcept {
   }
 
   imgui::new_frame(window::get_window_size());
+
   if (!gfx::begin_frame()) {
     return false;
   }
+
   gx::fifo::begin_frame();
+  gx::flush_texture_destructions();
 #endif
   return true;
 }
@@ -275,6 +294,7 @@ bool begin_frame() noexcept {
 void end_frame() noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
+  gx::flush_texture_destructions();
   gx::fifo::drain();
   gx::fifo::end_frame();
   gx::texture::end_frame();
@@ -301,9 +321,8 @@ void end_frame() noexcept {
   gfx::end_frame([black, brightness, rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport,
                   imguiDrawData = std::move(imguiDrawData)](
                      wgpu::CommandEncoder& encoder, std::vector<gfx::AfterSubmitCallback> afterSubmitCallbacks) {
-    // submit scene rendering before acquiring the swapchain image so the GPU can work during the VSync wait
-    // simple solution for some stutters from my testing
     const auto presentMode = webgpu::g_graphicsConfig.surfaceConfiguration.presentMode;
+
     if (presentMode == wgpu::PresentMode::Fifo || presentMode == wgpu::PresentMode::FifoRelaxed) {
       const wgpu::CommandBufferDescriptor sceneDescriptor{.label = "Scene command buffer"};
       const auto sceneCommands = encoder.Finish(&sceneDescriptor);
@@ -318,11 +337,13 @@ void end_frame() noexcept {
     auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
     {
       window::SurfaceLock surfaceLock;
+
       if (window::is_presentable() && g_surface) {
         ZoneScopedN("Acquire texture");
         wgpu::SurfaceTexture surfaceTexture;
         g_surface.GetCurrentTexture(&surfaceTexture);
         surfaceStatus = surfaceTexture.status;
+
         if (surfaceStatus == wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal) {
           currentTexture = std::move(surfaceTexture.texture);
           currentView = currentTexture.CreateView();
@@ -331,14 +352,17 @@ void end_frame() noexcept {
     }
 
     const bool canPresent = currentTexture && currentView;
+
     if (canPresent) {
       wgpu::BindGroup presentBindGroup;
+
       if (rmlBindGroup && !rmlOverlay) {
         presentBindGroup = rmlBindGroup;
       } else {
         const auto& resampledSource = webgpu::resample_present_source(encoder, viewport);
         presentBindGroup = webgpu::create_copy_bind_group(resampledSource);
       }
+
       {
         const std::array attachments{
             wgpu::RenderPassColorAttachment{
@@ -347,12 +371,14 @@ void end_frame() noexcept {
                 .storeOp = wgpu::StoreOp::Store,
             },
         };
+
         const wgpu::RenderPassDescriptor renderPassDescriptor{
             .label = "EFB copy render pass",
             .colorAttachmentCount = attachments.size(),
             .colorAttachments = attachments.data(),
             .timestampWrites = webgpu::gpu_prof::pass_writes("Present blit"),
         };
+
         const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
         // Copy EFB -> XFB (swapchain)
         if (brightness < 1.0f) {
@@ -362,6 +388,7 @@ void end_frame() noexcept {
         } else {
           pass.SetPipeline(webgpu::g_CopyPipeline);
         }
+
         pass.SetBindGroup(0, presentBindGroup, 0, nullptr);
         set_present_viewport(pass, viewport, webgpu::g_graphicsConfig.surfaceConfiguration.width,
                              webgpu::g_graphicsConfig.surfaceConfiguration.height);
@@ -369,13 +396,16 @@ void end_frame() noexcept {
         if (!black) {
           pass.Draw(3);
         }
+
         if (rmlBindGroup && rmlOverlay) {
           pass.SetPipeline(webgpu::g_CopyPremultipliedAlphaPipeline);
           pass.SetBindGroup(0, rmlBindGroup, 0, nullptr);
           pass.Draw(3);
         }
+
         pass.End();
       }
+
       {
         const std::array attachments{
             wgpu::RenderPassColorAttachment{
@@ -384,12 +414,14 @@ void end_frame() noexcept {
                 .storeOp = wgpu::StoreOp::Store,
             },
         };
+
         const wgpu::RenderPassDescriptor renderPassDescriptor{
             .label = "ImGui render pass",
             .colorAttachmentCount = attachments.size(),
             .colorAttachments = attachments.data(),
             .timestampWrites = webgpu::gpu_prof::pass_writes("ImGui"),
         };
+
         const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
         pass.SetViewport(0.f, 0.f, static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.width),
                          static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.height), 0.f, 1.f);
@@ -399,6 +431,7 @@ void end_frame() noexcept {
     } else {
       Log.info("Skipping present; window not presentable");
     }
+
     webgpu::gpu_prof::frame_end(encoder);
     const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Redraw command buffer"};
     const auto buffer = encoder.Finish(&cmdBufDescriptor);
@@ -406,17 +439,19 @@ void end_frame() noexcept {
       ZoneScopedN("Queue Submit");
       g_queue.Submit(1, &buffer);
     }
+
     webgpu::gpu_prof::after_submit();
-    gfx::depth_peek::after_submit();
     if (canPresent && g_surface) {
       ZoneScopedN("Present");
       wgpu::ConvertibleStatus status = wgpu::Status::Error;
       {
         window::SurfaceLock surfaceLock;
+
         if (window::is_presentable()) {
           status = g_surface.Present();
         }
       }
+
       if (status) {
         gfx::after_present();
       } else {
@@ -447,6 +482,7 @@ void end_frame() noexcept {
         } else {
           Log.error("Failed to get surface texture: {}", magic_enum::enum_name(surfaceStatus));
         }
+
         break;
       }
     }
@@ -455,6 +491,8 @@ void end_frame() noexcept {
         callback();
       }
     }
+
+    gfx::depth_peek::after_submit();
 
     TracyPlotConfig("aurora: lastVertSize", tracy::PlotFormatType::Memory, false, true, 0);
     TracyPlotConfig("aurora: lastUniformSize", tracy::PlotFormatType::Memory, false, true, 0);
@@ -483,27 +521,40 @@ void end_frame() noexcept {
 AuroraInfo aurora_initialize(int argc, char* argv[], const AuroraConfig* config) {
   return aurora::initialize(argc, argv, *config);
 }
+
 void aurora_shutdown() { aurora::shutdown(); }
+
 const AuroraEvent* aurora_update() { return aurora::update(); }
+
 bool aurora_begin_frame() { return aurora::begin_frame(); }
+
 void aurora_end_frame() { aurora::end_frame(); }
+
 SDL_Window* aurora_get_window() { return aurora::window::get_sdl_window(); }
+
 AuroraWindowSize aurora_get_window_size() {
   return aurora::window::get_sdl_window() != nullptr ? aurora::window::get_window_size() : AuroraWindowSize{};
 }
+
 AuroraBackend aurora_get_backend() { return aurora::g_config.desiredBackend; }
+
 const AuroraBackend* aurora_get_available_backends(size_t* count) {
   if (count != nullptr) {
     *count = aurora::PreferredBackendOrder.size();
   }
+
   return aurora::PreferredBackendOrder.data();
 }
+
 void aurora_set_log_level(AuroraLogLevel level) { aurora::g_config.logLevel = level; }
+
 void aurora_set_pause_on_focus_lost(bool value) { aurora::g_config.pauseOnFocusLost = value; }
+
 void aurora_set_background_input(bool value) {
   aurora::g_config.allowJoystickBackgroundEvents = value;
   aurora::window::set_background_input(value);
 }
+
 void aurora_set_resampler(AuroraSampler sampler) {
 #ifdef AURORA_ENABLE_GX
   aurora::webgpu::set_resampler(sampler);
@@ -511,5 +562,7 @@ void aurora_set_resampler(AuroraSampler sampler) {
   (void)sampler;
 #endif
 }
+
 void aurora_set_timescale(float scale) { aurora::time::set_scale(scale); }
+
 float aurora_get_timescale() { return aurora::time::scale(); }

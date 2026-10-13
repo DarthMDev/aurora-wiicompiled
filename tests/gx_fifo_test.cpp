@@ -8,6 +8,8 @@
 #include "__gx.h"
 #include "gx/regs.hpp"
 
+#define SDL_MAIN_HANDLED
+#include <SDL3/SDL_main.h>
 #include <algorithm>
 #include <atomic>
 #include <bit>
@@ -1725,12 +1727,10 @@ TEST_F(GXFifoTest, LoadTexObjCiAndTlut_PopulatesTextureAndTlutSlots) {
 
 TEST_F(GXFifoTest, TlutExecute_ReappliesSameTargetAfterSourceChanges) {
   const std::vector<u8> firstLoad{
-      0x61, 0x64, 0x00, 0x00, 0x11,
-      0x61, 0x65, 0x00, 0x00, 0x03,
+      0x61, 0x64, 0x00, 0x00, 0x11, 0x61, 0x65, 0x00, 0x00, 0x03,
   };
   const std::vector<u8> secondLoad{
-      0x61, 0x64, 0x00, 0x00, 0x22,
-      0x61, 0x65, 0x00, 0x00, 0x03,
+      0x61, 0x64, 0x00, 0x00, 0x22, 0x61, 0x65, 0x00, 0x00, 0x03,
   };
 
   decode_fifo(firstLoad);
@@ -1752,6 +1752,28 @@ TEST_F(GXFifoTest, DestroyTexObj_EmitsAuroraDestroyCommandAndClearsIdentity) {
 
   reset_gx_state();
   decode_fifo(bytes);
+}
+
+TEST_F(GXFifoTest, DestroyTexObj_DefersWorkerCleanupUntilFifoThreadFlush) {
+  SDL_SetMainReady();
+  alignas(32) u8 image[64]{};
+  auto* texture = new GXTexObj{};
+  GXInitTexObj(texture, image, 8, 8, GX_TF_RGB5A3, GX_REPEAT, GX_REPEAT, GX_FALSE);
+  capture_fifo();
+
+  std::thread cleanup([texture] {
+    GXDestroyTexObj(texture);
+    delete texture;
+  });
+  cleanup.join();
+
+  EXPECT_TRUE(capture_fifo().empty());
+  aurora::gx::flush_texture_destructions();
+  const auto bytes = capture_fifo();
+  EXPECT_TRUE(has_aurora_cmd(bytes, GX_AURORA_DESTROY_TEXOBJ));
+
+  aurora::gx::flush_texture_destructions();
+  EXPECT_TRUE(capture_fifo().empty());
 }
 
 TEST_F(GXFifoTest, DestroyTexObj_MarksLoadedSlotNoCacheUntilReloaded) {
@@ -1985,8 +2007,7 @@ TEST_F(GXFifoTest, NumChans) {
 TEST_F(GXFifoTest, GenMode_ReappliesAfterMirroredXfWrites) {
   const std::vector<u8> genMode{0x61, 0x00, 0x00, 0x00, 0x12}; // 2 texgens, 1 channel
   const std::vector<u8> xfCounts{
-      0x10, 0x00, 0x00, 0x10, 0x3F, 0x00, 0x00, 0x00, 0x03,
-      0x10, 0x00, 0x00, 0x10, 0x09, 0x00, 0x00, 0x00, 0x02,
+      0x10, 0x00, 0x00, 0x10, 0x3F, 0x00, 0x00, 0x00, 0x03, 0x10, 0x00, 0x00, 0x10, 0x09, 0x00, 0x00, 0x00, 0x02,
   };
 
   decode_fifo(genMode);
@@ -2001,8 +2022,7 @@ TEST_F(GXFifoTest, GenMode_ReappliesAfterMirroredXfWrites) {
 
 TEST_F(GXFifoTest, XfCounts_ReapplyAfterMirroredGenModeWrite) {
   const std::vector<u8> xfCounts{
-      0x10, 0x00, 0x00, 0x10, 0x3F, 0x00, 0x00, 0x00, 0x03,
-      0x10, 0x00, 0x00, 0x10, 0x09, 0x00, 0x00, 0x00, 0x02,
+      0x10, 0x00, 0x00, 0x10, 0x3F, 0x00, 0x00, 0x00, 0x03, 0x10, 0x00, 0x00, 0x10, 0x09, 0x00, 0x00, 0x00, 0x02,
   };
   const std::vector<u8> genMode{0x61, 0x00, 0x00, 0x00, 0x11}; // 1 texgen, 1 channel
 
@@ -2210,9 +2230,18 @@ TEST_F(GXFifoTest, LoadNrmMtxImm_Identity) {
 
 TEST_F(GXFifoTest, LoadNrmMtxImm_ArbitraryValues) {
   aurora::Mat3x4<float> mtx{};
-  mtx.m0[0] = 0.5f;  mtx.m0[1] = -0.5f; mtx.m0[2] = 0.7f;  mtx.m0[3] = 999.0f;
-  mtx.m1[0] = 0.3f;  mtx.m1[1] = 0.8f;  mtx.m1[2] = -0.1f; mtx.m1[3] = 888.0f;
-  mtx.m2[0] = -0.6f; mtx.m2[1] = 0.2f;  mtx.m2[2] = 0.9f;  mtx.m2[3] = 777.0f;
+  mtx.m0[0] = 0.5f;
+  mtx.m0[1] = -0.5f;
+  mtx.m0[2] = 0.7f;
+  mtx.m0[3] = 999.0f;
+  mtx.m1[0] = 0.3f;
+  mtx.m1[1] = 0.8f;
+  mtx.m1[2] = -0.1f;
+  mtx.m1[3] = 888.0f;
+  mtx.m2[0] = -0.6f;
+  mtx.m2[1] = 0.2f;
+  mtx.m2[2] = 0.9f;
+  mtx.m2[3] = 777.0f;
 
   GXLoadNrmMtxImm(&mtx, GX_PNMTX0);
   auto bytes = capture_fifo();
@@ -2343,9 +2372,18 @@ TEST_F(GXFifoTest, LoadTexMtx3x4_Identity) {
 
 TEST_F(GXFifoTest, LoadTexMtx3x4_ArbitraryValues) {
   aurora::Mat3x4<float> mtx{};
-  mtx.m0[0] = 2.0f;  mtx.m0[1] = 0.5f;  mtx.m0[2] = 0.0f;  mtx.m0[3] = 10.0f;
-  mtx.m1[0] = -0.5f; mtx.m1[1] = 3.0f;  mtx.m1[2] = 0.0f;  mtx.m1[3] = 20.0f;
-  mtx.m2[0] = 0.0f;  mtx.m2[1] = 0.0f;  mtx.m2[2] = 1.5f;  mtx.m2[3] = -5.0f;
+  mtx.m0[0] = 2.0f;
+  mtx.m0[1] = 0.5f;
+  mtx.m0[2] = 0.0f;
+  mtx.m0[3] = 10.0f;
+  mtx.m1[0] = -0.5f;
+  mtx.m1[1] = 3.0f;
+  mtx.m1[2] = 0.0f;
+  mtx.m1[3] = 20.0f;
+  mtx.m2[0] = 0.0f;
+  mtx.m2[1] = 0.0f;
+  mtx.m2[2] = 1.5f;
+  mtx.m2[3] = -5.0f;
 
   GXLoadTexMtxImm(&mtx, GX_TEXMTX0, GX_MTX3x4);
   auto bytes = capture_fifo();
@@ -2461,8 +2499,14 @@ TEST_F(GXFifoTest, LoadTexMtx2x4_Identity) {
 
 TEST_F(GXFifoTest, LoadTexMtx2x4_ArbitraryValues) {
   aurora::Mat3x4<float> mtx{};
-  mtx.m0[0] = 0.5f;  mtx.m0[1] = -1.0f; mtx.m0[2] = 0.25f; mtx.m0[3] = 100.0f;
-  mtx.m1[0] = 3.0f;  mtx.m1[1] = 0.0f;  mtx.m1[2] = -2.5f; mtx.m1[3] = -50.0f;
+  mtx.m0[0] = 0.5f;
+  mtx.m0[1] = -1.0f;
+  mtx.m0[2] = 0.25f;
+  mtx.m0[3] = 100.0f;
+  mtx.m1[0] = 3.0f;
+  mtx.m1[1] = 0.0f;
+  mtx.m1[2] = -2.5f;
+  mtx.m1[3] = -50.0f;
   // Row 2 values should be ignored by the encoder
   mtx.m2[0] = 999.0f;
 
@@ -3591,8 +3635,7 @@ TEST_F(GXFifoTest, GetNumXfbLines_QuantizesAndClamps) {
 TEST_F(GXFifoTest, GetYScaleFactor_CommonFramebufferSizes) {
   EXPECT_FLOAT_EQ(GXGetYScaleFactor(480, 480), 1.0f);
   EXPECT_FLOAT_EQ(GXGetYScaleFactor(528, 528), 1.0f);
-  for (const auto [efbHeight, xfbHeight] : {std::pair{240u, 480u}, std::pair{480u, 576u},
-                                         std::pair{528u, 576u}}) {
+  for (const auto [efbHeight, xfbHeight] : {std::pair{240u, 480u}, std::pair{480u, 576u}, std::pair{528u, 576u}}) {
     const f32 scale = GXGetYScaleFactor(efbHeight, xfbHeight);
     EXPECT_LE(GXGetNumXfbLines(efbHeight, scale), xfbHeight);
     EXPECT_GT(scale, 0.0f);
@@ -3753,9 +3796,18 @@ TEST_F(GXFifoTest, LoadPTTexMtx_Identity) {
 
 TEST_F(GXFifoTest, LoadPTTexMtx_ArbitraryValues) {
   aurora::Mat3x4<float> mtx{};
-  mtx.m0[0] = 2.0f;  mtx.m0[1] = 0.5f;  mtx.m0[2] = 0.0f;  mtx.m0[3] = 10.0f;
-  mtx.m1[0] = -0.5f; mtx.m1[1] = 3.0f;  mtx.m1[2] = 0.0f;  mtx.m1[3] = 20.0f;
-  mtx.m2[0] = 0.0f;  mtx.m2[1] = 0.0f;  mtx.m2[2] = 1.5f;  mtx.m2[3] = -5.0f;
+  mtx.m0[0] = 2.0f;
+  mtx.m0[1] = 0.5f;
+  mtx.m0[2] = 0.0f;
+  mtx.m0[3] = 10.0f;
+  mtx.m1[0] = -0.5f;
+  mtx.m1[1] = 3.0f;
+  mtx.m1[2] = 0.0f;
+  mtx.m1[3] = 20.0f;
+  mtx.m2[0] = 0.0f;
+  mtx.m2[1] = 0.0f;
+  mtx.m2[2] = 1.5f;
+  mtx.m2[3] = -5.0f;
 
   GXLoadTexMtxImm(&mtx, GX_PTTEXMTX0, GX_MTX3x4);
   auto bytes = capture_fifo();
