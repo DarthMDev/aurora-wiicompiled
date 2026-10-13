@@ -1,4 +1,5 @@
 #include <dolphin/ar.h>
+#include <dolphin/arq.h>
 #include "../internal.hpp"
 #include <revolution/os.h>
 

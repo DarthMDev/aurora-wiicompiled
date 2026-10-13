@@ -221,50 +221,8 @@ if (AURORA_ENABLE_GX)
     message(STATUS "aurora: Using existing Freetype")
   endif ()
 
-  if (NOT TARGET imgui)
-    message(STATUS "aurora: Fetching imgui")
-    FetchContent_Declare(imgui
-      URL https://github.com/ocornut/imgui/archive/refs/tags/v1.91.9b-docking.tar.gz
-      URL_HASH SHA256=466fdef9b18de15f0bb6e288e3d00ffa3d82200ec458ce5e4f724a161d9528a5
-      DOWNLOAD_EXTRACT_TIMESTAMP FALSE
-      EXCLUDE_FROM_ALL
-    )
-    FetchContent_MakeAvailable(imgui)
-
-    add_library(imgui STATIC
-      ${imgui_SOURCE_DIR}/imgui.cpp
-      ${imgui_SOURCE_DIR}/imgui_demo.cpp
-      ${imgui_SOURCE_DIR}/imgui_draw.cpp
-      ${imgui_SOURCE_DIR}/imgui_tables.cpp
-      ${imgui_SOURCE_DIR}/imgui_widgets.cpp
-      ${imgui_SOURCE_DIR}/misc/cpp/imgui_stdlib.cpp
-    )
-    target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR})
-
-    add_library(imgui_backends STATIC
-      ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
-      ${imgui_SOURCE_DIR}/backends/imgui_impl_sdlrenderer3.cpp
-      ${imgui_SOURCE_DIR}/backends/imgui_impl_wgpu.cpp
-    )
-    target_compile_definitions(imgui_backends PRIVATE IMGUI_IMPL_WEBGPU_BACKEND_DAWN)
-    target_link_libraries(imgui_backends PRIVATE imgui ${AURORA_SDL3_TARGET} dawn::webgpu_dawn)
-    target_link_libraries(imgui PUBLIC imgui_backends)
-
-    if (TARGET Freetype::Freetype)
-      target_sources(imgui PRIVATE ${imgui_SOURCE_DIR}/misc/freetype/imgui_freetype.cpp)
-      target_compile_definitions(imgui PUBLIC IMGUI_ENABLE_FREETYPE)
-      target_link_libraries(imgui PRIVATE Freetype::Freetype)
-    endif ()
-  else ()
-    message(STATUS "aurora: Using existing imgui")
-  endif ()
-
-  if (TARGET imgui)
-    target_include_directories(imgui PUBLIC ${PROJECT_SOURCE_DIR}/include)
-    target_compile_definitions(imgui PUBLIC IMGUI_USER_CONFIG="aurora/imgui_config.h")
-    target_sources(imgui PRIVATE ${PROJECT_SOURCE_DIR}/lib/imgui_config.cpp)
-    target_link_libraries(imgui PRIVATE ${AURORA_SDL3_TARGET})
-  endif ()
+  set(AURORA_IMGUI_IMPLEMENTATION ON)
+  include(../cmake/AuroraDearImguiProvider.cmake)
 
   aurora_find_package_global(SQLite3)
   if (TARGET SQLite3::SQLite3)
@@ -330,12 +288,9 @@ if (AURORA_ENABLE_GX)
   if (AURORA_ENABLE_RMLUI AND NOT TARGET RmlUi)
     message(STATUS "aurora: Fetching RmlUi")
     FetchContent_Declare(rmlui
-      URL https://github.com/mikke89/RmlUi/archive/0ae381e00d7426762bb5ed897973366358b16642.tar.gz
-      URL_HASH SHA256=fa4b84db1bae7b929996beb51d79b7037cd7aec438737a0df4d3c816d9b13bd8
+      URL https://github.com/encounter/RmlUi/archive/f00a0fee38391b2f927114e11bea18dc0a7dba1e.tar.gz
+      URL_HASH SHA256=6d9fd1164b7873c9dfba72d724753bda9e3db8280c9af802eed8e2a12035f152
       DOWNLOAD_EXTRACT_TIMESTAMP FALSE
-      PATCH_COMMAND ${CMAKE_COMMAND}
-        -DRMLUI_SOURCE_DIR=<SOURCE_DIR>
-        -P "${CMAKE_CURRENT_LIST_DIR}/../cmake/patches/apply-rmlui-keyboard-showed-state.cmake"
       EXCLUDE_FROM_ALL
     )
     block(SCOPE_FOR VARIABLES PROPAGATE rmlui_SOURCE_DIR rmlui_BINARY_DIR rmlui_POPULATED)
@@ -344,7 +299,6 @@ if (AURORA_ENABLE_GX)
     endblock()
 
     add_library(rmlui_backends STATIC ${rmlui_SOURCE_DIR}/Backends/RmlUi_Platform_SDL.cpp)
-    # TODO: maybe dont hardcode this to SDL3?
     target_compile_definitions(rmlui_backends PUBLIC RMLUI_SDL_VERSION_MAJOR=3)
     target_include_directories(rmlui_backends PUBLIC ${rmlui_SOURCE_DIR}/Backends)
     target_link_libraries(rmlui_backends PRIVATE rmlui ${AURORA_SDL3_TARGET})

@@ -6,6 +6,7 @@
 
 #include "gx_test_common.hpp"
 #include "__gx.h"
+#include "gx/regs.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -1847,19 +1848,13 @@ TEST_F(GXFifoTest, DestroyCopyTex_EmitsAuroraDestroyCommand) {
   decode_fifo(bytes);
 }
 
-TEST_F(GXFifoTest, DestroyCopyTex_RemovesActiveCopyTextureAndCacheEntriesForPointer) {
+TEST_F(GXFifoTest, DestroyCopyTex_RetiresOnlyTheRequestedDestination) {
   alignas(32) u8 imageA[32]{};
   alignas(32) u8 imageB[32]{};
 
   const aurora::gx::GXState::CopyTextureRef ref{.revision = 1};
   gxState().copyTextures[imageA] = ref;
   gxState().copyTextures[imageB] = ref;
-  gxState().copyTextureCache.emplace(
-      aurora::gx::GXState::CopyTextureKey{.dest = imageA, .width = 32, .height = 32, .format = GX_TF_I4}, ref);
-  gxState().copyTextureCache.emplace(
-      aurora::gx::GXState::CopyTextureKey{.dest = imageA, .width = 64, .height = 64, .format = GX_TF_I8}, ref);
-  gxState().copyTextureCache.emplace(
-      aurora::gx::GXState::CopyTextureKey{.dest = imageB, .width = 32, .height = 32, .format = GX_TF_I4}, ref);
 
   GXDestroyCopyTex(imageA);
   auto bytes = capture_fifo();
@@ -1868,10 +1863,6 @@ TEST_F(GXFifoTest, DestroyCopyTex_RemovesActiveCopyTextureAndCacheEntriesForPoin
 
   EXPECT_FALSE(gxState().copyTextures.contains(imageA));
   EXPECT_TRUE(gxState().copyTextures.contains(imageB));
-  for (const auto& [key, _] : gxState().copyTextureCache) {
-    EXPECT_NE(key.dest, imageA);
-  }
-  EXPECT_EQ(gxState().copyTextureCache.size(), 1u);
 }
 
 // ============================================================================
@@ -2083,6 +2074,55 @@ TEST_F(GXFifoTest, LoadPosMtxIndx_DecodesBigEndianArray) {
   for (size_t i = 0; i < values.size(); ++i) {
     EXPECT_FLOAT_EQ(reinterpret_cast<const f32*>(&decoded)[i], values[i]);
   }
+}
+
+TEST_F(GXFifoTest, LoadIdentity_RecognizesBothTextureMatrixSizes) {
+  aurora::Mat3x4<float> mtx{};
+  mtx.m0[0] = mtx.m1[1] = mtx.m2[2] = 1.0f;
+  for (const auto type : {GX_MTX2x4, GX_MTX3x4}) {
+    GXLoadTexMtxImm(&mtx, GX_IDENTITY, type);
+    const auto bytes = capture_fifo();
+    const u32 words = type == GX_MTX2x4 ? 8u : 12u;
+    ASSERT_EQ(bytes.size(), 5u + words * sizeof(u32));
+    EXPECT_TRUE(aurora::gx::fifo::copy_xf_data(0x0F0, bytes.data() + 5, words, std::endian::big));
+    auto custom = bytes;
+    custom[5] = 0;
+    EXPECT_FALSE(aurora::gx::fifo::copy_xf_data(0x0F0, custom.data() + 5, words, std::endian::big));
+  }
+}
+
+TEST_F(GXFifoTest, LoadPTIdentity_RejectsCustomMatrixAndWrongLength) {
+  aurora::Mat3x4<float> mtx{};
+  mtx.m0[0] = 2.0f;
+  mtx.m1[1] = mtx.m2[2] = 1.0f;
+  GXLoadTexMtxImm(&mtx, GX_PTIDENTITY, GX_MTX3x4);
+  const auto bytes = capture_fifo();
+  EXPECT_FALSE(aurora::gx::fifo::copy_xf_data(0x5F4, bytes.data() + 5, 12, std::endian::big));
+  EXPECT_FALSE(aurora::gx::fifo::copy_xf_data(0x5F4, bytes.data() + 5, 8, std::endian::big));
+}
+
+TEST_F(GXFifoTest, LoadNrmMtxIndx3x3_RoundTripWithFullIndexAndFollowingCommand) {
+  std::array<std::array<f32, 9>, 257> matrices{};
+  matrices[0x100] = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f, 8.f, 9.f};
+  GXSetArray(GX_NRM_MTX_ARRAY, matrices.data(), sizeof(matrices), sizeof(matrices[0]), true);
+  GXLoadNrmMtxIndx3x3(0x100, GX_PNMTX3);
+  GXSetBlendMode(GX_BM_SUBTRACT, GX_BL_ONE, GX_BL_ONE, GX_LO_NOOP);
+  const auto bytes = capture_fifo();
+  ASSERT_EQ(bytes.size(), 32u);
+  EXPECT_EQ(bytes[22], GX_LOAD_INDX_B);
+  EXPECT_EQ(bytes[23], 0x01);
+  EXPECT_EQ(bytes[24], 0x00);
+  EXPECT_EQ(bytes[25], 0x84);
+  EXPECT_EQ(bytes[26], 0x1B);
+  reset_gx_state();
+  decode_fifo(bytes);
+  const auto& decoded = g_gxState.pnMtx[3].nrm;
+  for (u32 row = 0; row < 3; ++row) {
+    for (u32 col = 0; col < 3; ++col) {
+      EXPECT_FLOAT_EQ(reinterpret_cast<const f32*>(&decoded)[row * 4 + col], matrices[0x100][row * 3 + col]);
+    }
+  }
+  EXPECT_EQ(g_gxState.blendMode, GX_BM_SUBTRACT);
 }
 
 // --- GXLoadPosMtxImm (XF 0x000-0x077) ---
@@ -2556,10 +2596,12 @@ TEST_F(GXFifoTest, GetProjectionAndScissorShadowState) {
 
 TEST_F(GXFifoTest, Scissor_EncodesBpAndDecodesLogicalState) {
   GXSetScissor(16, 24, 320, 240);
+  GXSetScissorBoxOffset(0, 0);
   auto bytes = capture_fifo();
 
   EXPECT_TRUE(has_bp_write(bytes, 0x20));
   EXPECT_TRUE(has_bp_write(bytes, 0x21));
+  EXPECT_TRUE(has_bp_write(bytes, 0x59));
 
   reset_gx_state();
   decode_fifo(bytes);
@@ -3537,6 +3579,26 @@ TEST_F(GXFifoTest, TexCoordScale_Isolation) {
 }
 
 // ============================================================================
+// GX copy scaling uses a quantized 9-bit reciprocal, rather than height * scale.
+TEST_F(GXFifoTest, GetNumXfbLines_QuantizesAndClamps) {
+  EXPECT_EQ(GXGetNumXfbLines(480, 1.0f), 480);
+  EXPECT_EQ(GXGetNumXfbLines(240, 2.0f), 479);
+  EXPECT_EQ(GXGetNumXfbLines(480, 1.5f), 722);
+  EXPECT_EQ(GXGetNumXfbLines(510, 1.5f), 768);
+  EXPECT_EQ(GXGetNumXfbLines(528, 3.0f), 1024);
+}
+
+TEST_F(GXFifoTest, GetYScaleFactor_CommonFramebufferSizes) {
+  EXPECT_FLOAT_EQ(GXGetYScaleFactor(480, 480), 1.0f);
+  EXPECT_FLOAT_EQ(GXGetYScaleFactor(528, 528), 1.0f);
+  for (const auto [efbHeight, xfbHeight] : {std::pair{240u, 480u}, std::pair{480u, 576u},
+                                         std::pair{528u, 576u}}) {
+    const f32 scale = GXGetYScaleFactor(efbHeight, xfbHeight);
+    EXPECT_LE(GXGetNumXfbLines(efbHeight, scale), xfbHeight);
+    EXPECT_GT(scale, 0.0f);
+  }
+}
+
 // GXSetTexCopyDst
 // ============================================================================
 
@@ -3616,50 +3678,6 @@ TEST_F(GXFifoTest, CopyClear_MaxDepth) {
   EXPECT_EQ(g_gxState.clearDepth, 0xFFFFFFu);
 }
 
-TEST_F(GXFifoTest, PeekZ_FallsBackToZeroAndRequestsSnapshot) {
-  g_gxState.clearDepth = 0x123456;
-
-  u32 z = 0;
-  GXPeekZ(10, 20, &z);
-
-  EXPECT_EQ(z, 0u);
-  EXPECT_TRUE(aurora::gfx::depth_peek::testing::snapshot_requested());
-
-  auto bytes = capture_fifo();
-  EXPECT_FALSE(has_aurora_cmd(bytes, GX_AURORA_REQUEST_DEPTH_SNAPSHOT));
-  decode_fifo(bytes);
-  EXPECT_TRUE(aurora::gfx::depth_peek::testing::snapshot_requested());
-}
-
-TEST_F(GXFifoTest, PeekZ_ReturnsLatestCompletedSnapshot) {
-  aurora::gfx::depth_peek::testing::set_latest(2, 2, {0x000001, 0x000002, 0x000003, 0x01000004});
-
-  u32 z = 0;
-  GXPeekZ(1, 1, &z);
-
-  EXPECT_EQ(z, 0x000004u);
-  EXPECT_TRUE(aurora::gfx::depth_peek::testing::snapshot_requested());
-
-  auto bytes = capture_fifo();
-  decode_fifo(bytes);
-  EXPECT_TRUE(aurora::gfx::depth_peek::testing::snapshot_requested());
-}
-
-TEST_F(GXFifoTest, PeekZ_OutOfRangeFallsBackToZero) {
-  g_gxState.clearDepth = 0xabcdef;
-  aurora::gfx::depth_peek::testing::set_latest(1, 1, {0x000001});
-
-  u32 z = 0;
-  GXPeekZ(1, 0, &z);
-
-  EXPECT_EQ(z, 0u);
-  EXPECT_TRUE(aurora::gfx::depth_peek::testing::snapshot_requested());
-
-  auto bytes = capture_fifo();
-  decode_fifo(bytes);
-  EXPECT_TRUE(aurora::gfx::depth_peek::testing::snapshot_requested());
-}
-
 // ============================================================================
 // Composite tests (multiple state changes in a single FIFO stream)
 // ============================================================================
@@ -3686,6 +3704,21 @@ TEST_F(GXFifoTest, Composite_BlendAndZMode) {
 }
 
 // --- GXLoadTexMtxImm for PTTexMtx (XF 0x500-0x5EF) ---
+
+TEST_F(GXFifoTest, LoadPTIdentity_IsRecognized) {
+  aurora::Mat3x4<float> mtx{};
+  mtx.m0[0] = 1.0f;
+  mtx.m1[1] = 1.0f;
+  mtx.m2[2] = 1.0f;
+
+  GXLoadTexMtxImm(&mtx, GX_PTIDENTITY, GX_MTX3x4);
+  auto bytes = capture_fifo();
+
+  ASSERT_EQ(bytes.size(), 5u + 12u * sizeof(u32));
+  EXPECT_EQ(bytes[0], GX_LOAD_XF_REG);
+  EXPECT_EQ(read_fifo_u32(bytes, 1), 0x000B05F4u);
+  EXPECT_TRUE(aurora::gx::fifo::copy_xf_data(0x5F4, bytes.data() + 5, 12, std::endian::big));
+}
 
 TEST_F(GXFifoTest, LoadPTTexMtx_Identity) {
   aurora::Mat3x4<float> mtx{};
@@ -3841,4 +3874,47 @@ TEST_F(GXFifoTest, Composite_TevSetup) {
   EXPECT_EQ(g_gxState.tevStages[0].channelId, GX_COLOR0A0);
   EXPECT_EQ(g_gxState.tevStages[0].colorPass.d, GX_CC_TEXC);
   EXPECT_EQ(g_gxState.tevStages[0].alphaPass.d, GX_CA_TEXA);
+}
+
+TEST_F(GXFifoTest, PeekZ_FallsBackToZeroAndRequestsSnapshot) {
+  g_gxState.clearDepth = 0x123456;
+
+  u32 z = 0;
+  GXPeekZ(10, 20, &z);
+
+  EXPECT_EQ(z, 0u);
+  EXPECT_TRUE(aurora::gfx::depth_peek::testing::snapshot_requested());
+
+  auto bytes = capture_fifo();
+  decode_fifo(bytes);
+  EXPECT_TRUE(aurora::gfx::depth_peek::testing::snapshot_requested());
+}
+
+TEST_F(GXFifoTest, PeekZ_ReturnsLatestCompletedSnapshot) {
+  aurora::gfx::depth_peek::testing::set_latest(2, 2, {0x000001, 0x000002, 0x000003, 0x01000004});
+
+  u32 z = 0;
+  GXPeekZ(1, 1, &z);
+
+  EXPECT_EQ(z, 0x000004u);
+  EXPECT_TRUE(aurora::gfx::depth_peek::testing::snapshot_requested());
+
+  auto bytes = capture_fifo();
+  decode_fifo(bytes);
+  EXPECT_TRUE(aurora::gfx::depth_peek::testing::snapshot_requested());
+}
+
+TEST_F(GXFifoTest, PeekZ_OutOfRangeFallsBackToZero) {
+  g_gxState.clearDepth = 0xabcdef;
+  aurora::gfx::depth_peek::testing::set_latest(1, 1, {0x000001});
+
+  u32 z = 0;
+  GXPeekZ(1, 0, &z);
+
+  EXPECT_EQ(z, 0u);
+  EXPECT_TRUE(aurora::gfx::depth_peek::testing::snapshot_requested());
+
+  auto bytes = capture_fifo();
+  decode_fifo(bytes);
+  EXPECT_TRUE(aurora::gfx::depth_peek::testing::snapshot_requested());
 }

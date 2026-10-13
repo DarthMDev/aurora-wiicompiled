@@ -1,5 +1,5 @@
 #include "backend.hpp"
-#include "../../input.hpp"
+#include "../../gamepad.hpp"
 
 #include <SDL3/SDL_timer.h>
 
@@ -44,7 +44,7 @@ std::array<HostState, WPAD_MAX_CONTROLLERS> read_host() {
 	}
 
 	float x = 0, y = 0;
-	if (!result[0].blocked && input::get_mouse_pointer(&x, &y)) {
+	if (!result[0].blocked && gamepad::get_mouse_pointer(&x, &y)) {
 		result[0].pointer = {x, y, TRUE};
 	}
 
@@ -52,7 +52,7 @@ std::array<HostState, WPAD_MAX_CONTROLLERS> read_host() {
 }
 
 void install_hooks(void (*update)(), void (*shutdown)()) {
-	input::set_wpad_hooks(update, shutdown);
+	gamepad::set_wpad_hooks(update, shutdown);
 }
 
 double now() {

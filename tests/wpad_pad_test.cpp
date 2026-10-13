@@ -1,7 +1,7 @@
 #include <aurora/aurora.h>
 #include <aurora/wpad.h>
 #include <revolution/kpad.h>
-#include "input.hpp"
+#include "gamepad.hpp"
 
 #include <SDL3/SDL_init.h>
 #include <gtest/gtest.h>
@@ -26,7 +26,7 @@ TEST(WpadPadTest, VirtualPadUsesRealBackendAndInputLifecycle) {
 	pad.button = PAD_BUTTON_A | PAD_TRIGGER_Z;
 	pad.stickX = 127;
 	PADSetVirtualStatus(2, &pad);
-	aurora::input::update();
+	aurora::gamepad::update();
 
 	u32 device = WPAD_DEV_UNKNOWN;
 	EXPECT_EQ(WPADProbe(2, &device), WPAD_ERR_NONE);
@@ -39,19 +39,19 @@ TEST(WpadPadTest, VirtualPadUsesRealBackendAndInputLifecycle) {
 	EXPECT_EQ(status.dpd_valid_fg, 0);
 
 	PADBlockInput(true);
-	aurora::input::update();
+	aurora::gamepad::update();
 	ASSERT_EQ(KPADRead(2, &status, 1), 1);
 	EXPECT_EQ(status.hold, 0u);
 	EXPECT_EQ(status.release, WPAD_BUTTON_A | WPAD_BUTTON_Z);
 	EXPECT_FLOAT_EQ(status.ex_status.fs.stick.x, 0);
 
 	PADClearVirtualStatus(2);
-	aurora::input::update();
+	aurora::gamepad::update();
 	EXPECT_EQ(WPADProbe(2, nullptr), WPAD_ERR_NO_CONTROLLER);
 	EXPECT_EQ(KPADRead(2, &status, 1), 1);
 	EXPECT_EQ(status.wpad_err, WPAD_ERR_NO_CONTROLLER);
 
-	aurora::input::shutdown();
+	aurora::gamepad::shutdown();
 	EXPECT_EQ(WPADGetStatus(), WPAD_STATE_DISABLED);
 	PADBlockInput(false);
 	SDL_Quit();

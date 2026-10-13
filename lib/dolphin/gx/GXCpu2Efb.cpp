@@ -1,4 +1,5 @@
 #include "gx.hpp"
+#include "__gx.h"
 #include "../../gfx/depth_peek.hpp"
 #include "../../gfx/color_peek.hpp"
 #include <atomic>
@@ -28,6 +29,7 @@ std::atomic<GXAlphaReadMode> sAlphaRead{GX_READ_NONE};
 
 void GXPokeAlphaRead(GXAlphaReadMode mode) {
 	sAlphaRead.store(mode);
+    __gx->alphaRead = mode;
 }
 
 void GXPeekARGB(u16 x, u16 y, u32* color) {

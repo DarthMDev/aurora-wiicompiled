@@ -6,7 +6,16 @@ add_library(aurora_core STATIC
         lib/video.hpp
         lib/device.cpp
         lib/device.hpp
-        lib/input.cpp
+        lib/gamepad.cpp
+        lib/gamepad.hpp
+        lib/input/binding.cpp
+        lib/input/capture.cpp
+        lib/input/router.cpp
+        lib/input/router.hpp
+        lib/input/sdl_input.cpp
+        lib/input/sdl_input.hpp
+        lib/input/source_state.cpp
+        lib/input/source_state.hpp
         lib/io.cpp
         lib/io.hpp
         lib/logging.cpp
@@ -21,13 +30,19 @@ add_library(aurora_core STATIC
 add_library(aurora::core ALIAS aurora_core)
 set_target_properties(aurora_core PROPERTIES FOLDER "aurora")
 
-target_compile_definitions(aurora_core PUBLIC AURORA TARGET_PC)
+target_compile_definitions(aurora_core PUBLIC AURORA TARGET_PC=1)
 target_include_directories(aurora_core PUBLIC include)
 target_link_libraries(aurora_core PUBLIC fmt::fmt ${AURORA_SDL3_TARGET} xxHash::xxhash)
 target_link_libraries(aurora_core PRIVATE absl::btree absl::flat_hash_map Tracy::TracyClient)
 if (AURORA_ENABLE_GX AND AURORA_CACHE_USE_ZSTD)
     target_compile_definitions(aurora_core PRIVATE AURORA_CACHE_USE_ZSTD)
     target_link_libraries(aurora_core PRIVATE zstd::libzstd)
+endif ()
+
+if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    target_compile_options(aurora_core PUBLIC
+            /Zc:__cplusplus # Enable updated `__cplusplus` macro
+    )
 endif ()
 
 if (CMAKE_SYSTEM_NAME STREQUAL Windows)
@@ -50,7 +65,7 @@ if (AURORA_ENABLE_GX)
     target_link_libraries(aurora_core PRIVATE sqlite3)
 endif ()
 
-if(AURORA_ENABLE_RMLUI)
+if (AURORA_ENABLE_RMLUI)
     target_compile_definitions(aurora_core PUBLIC AURORA_ENABLE_RMLUI)
 
     target_sources(aurora_core PRIVATE
@@ -61,6 +76,7 @@ if(AURORA_ENABLE_RMLUI)
             lib/rmlui/SystemInterface_Aurora.cpp
             lib/rmlui/FileInterface_SDL.cpp
             lib/rmlui/GlassFilter.cpp
+            lib/rmlui/ImageEffects.cpp
     )
     target_link_libraries(aurora_core PUBLIC rmlui)
 

@@ -6,8 +6,9 @@
 
 #include "gx/gx.hpp"
 #include "gx/fifo.hpp"
-#include "gx/command_processor.hpp"
 #include "gfx/depth_peek.hpp"
+#include "gx/command_processor.hpp"
+#include "gfx/readback/readback.hpp"
 
 #include <cstring>
 #include <vector>
@@ -22,6 +23,7 @@ protected:
     aurora::gx::fifo::clear_buffer();
     aurora::gx::g_gxState = aurora::gx::GXState{};
     aurora::gfx::depth_peek::testing::reset();
+    aurora::gfx::readback::initialize();
   }
 
   void TearDown() override { aurora::gx::fifo::shutdown(); }

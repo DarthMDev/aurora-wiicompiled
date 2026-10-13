@@ -133,26 +133,22 @@ void bp_tev_ind(u8 reg, u32 value) noexcept {
 void bp_scissor(u8, u32) noexcept {
   const u32 scis0 = g_gxState.bpRegCache[0x20];
   const u32 scis1 = g_gxState.bpRegCache[0x21];
-  const s32 tp = static_cast<s32>(reg_get(scis0, 11, 0)) - g_gxState.scissorOffsetY;
-  const s32 lf = static_cast<s32>(reg_get(scis0, 11, 12)) - g_gxState.scissorOffsetX;
-  const s32 bm = static_cast<s32>(reg_get(scis1, 11, 0)) - g_gxState.scissorOffsetY;
-  const s32 rt = static_cast<s32>(reg_get(scis1, 11, 12)) - g_gxState.scissorOffsetX;
+
+  const u32 boxOffset = g_gxState.bpRegCache[0x59];
+  // The box offset fields are signed 9-bit values and also halved, like the viewport registers. Sign extend.
+  const s32 offsX = static_cast<s32>(reg_get(boxOffset, 10, 0)) << 23 >> 22;
+  const s32 offsY = static_cast<s32>(reg_get(boxOffset, 10, 10)) << 23 >> 22;
+
+  const s32 tp = static_cast<s32>(reg_get(scis0, 11, 0)) + offsY;
+  const s32 lf = static_cast<s32>(reg_get(scis0, 11, 12)) + offsX;
+  const s32 bm = static_cast<s32>(reg_get(scis1, 11, 0)) + offsY;
+  const s32 rt = static_cast<s32>(reg_get(scis1, 11, 12)) + offsX;
   const s32 wd = std::max(rt - lf + 1, 0);
   const s32 ht = std::max(bm - tp + 1, 0);
   set_logical_scissor({lf, tp, wd, ht});
 }
 
-void bp_scissor_offset(u8, u32 value) noexcept {
-	const s32 x = static_cast<s32>(reg_get(value, 10, 0)) * 2;
-	const s32 y = static_cast<s32>(reg_get(value, 10, 10)) * 2;
-	auto viewport = g_gxState.logicalViewport;
-	viewport.left += g_gxState.scissorOffsetX - x;
-	viewport.top += g_gxState.scissorOffsetY - y;
-	g_gxState.scissorOffsetX = x;
-	g_gxState.scissorOffsetY = y;
-	set_logical_viewport(viewport);
-	bp_scissor(0, 0);
-}
+
 
 // Line/point size (0x22)
 void bp_line_point_size(u8, u32 value) noexcept {
@@ -552,7 +548,6 @@ constexpr auto kBpRegs = [] {
   }
   regs[0x20] = {bp_scissor};
   regs[0x21] = {bp_scissor};
-	regs[0x59] = {bp_scissor_offset};
   regs[0x22] = {bp_line_point_size, DirtyUniform};
   regs[0x25] = {bp_ind_scale, DirtyPipeline};
   regs[0x26] = {bp_ind_scale, DirtyPipeline};
@@ -566,13 +561,12 @@ constexpr auto kBpRegs = [] {
   regs[0x40] = {bp_z_mode, DirtyPipeline};
   regs[0x41] = {bp_cmode0, DirtyPipeline};
   regs[0x42] = {bp_cmode1, DirtyPipeline};
-  regs[0x43] = {bp_pe_ctrl};
-  regs[0x47] = {};
-  regs[0x48] = {};
+  regs[0x43] = {bp_pe_ctrl, DirtyPipeline};
   regs[0x4F] = {bp_clear_ra};
   regs[0x50] = {bp_clear_bg};
   regs[0x51] = {bp_clear_depth};
   regs[0x52] = {bp_efb_copy, 0, /* alwaysHandle */ true};
+  regs[0x59] = {bp_scissor};
   regs[0x64] = {}; // TLUT load address; bp_tlut_load reads from shadow
   regs[0x65] = {bp_tlut_load, DirtyTextures, /* alwaysHandle */ true};
   for (u32 base : {0x80u, 0xA0u}) {
@@ -925,8 +919,8 @@ void xf_load_viewport() noexcept {
   f32 width = sx * 2.0f;
   f32 height = -sy * 2.0f;
   set_logical_viewport({
-      .left = ox + 2.0f - g_gxState.scissorOffsetX - width / 2.0f,
-      .top = oy + 2.0f - g_gxState.scissorOffsetY - height / 2.0f,
+      .left = ox - 340.0f - width / 2.0f,
+      .top = oy - 340.0f - height / 2.0f,
       .width = width,
       .height = height,
       .znear = (oz - sz) / 1.6777215e7f,
@@ -1051,6 +1045,16 @@ bool copy_xf_data(u32 addr, const u8* data, u32 len, std::endian e) noexcept {
     }
     return true;
   }
+  // GX_IDENTITY is synthesized by the shader; identity writes are harmless.
+  if (addr == 0x0F0 && (len == 8 || len == 12)) {
+    for (u32 i = 0; i < len; i++) {
+      const u32 expected = i % 5 == 0 ? 0x3F800000u : 0u;
+      if (read_bits<u32>(data + i * 4, e) != expected) {
+        return false;
+      }
+    }
+    return true;
+  }
   if (addr >= 0x400 && addr < 0x45A) {
     // Normal matrices (0x400-0x459)
     u32 nrmBase = addr - 0x400;
@@ -1085,6 +1089,16 @@ bool copy_xf_data(u32 addr, const u8* data, u32 len, std::endian e) noexcept {
     }
     if (changed) {
       g_gxState.dirty |= DirtyUniform;
+    }
+    return true;
+  }
+  if (addr == 0x5F4 && len == 12) {
+    // GX_PTIDENTITY is synthesized by the shader, like GX_IDENTITY above.
+    for (u32 i = 0; i < len; ++i) {
+      const u32 expected = i % 5 == 0 ? 0x3F800000u : 0u;
+      if (read_bits<u32>(data + i * 4, e) != expected) {
+        return false;
+      }
     }
     return true;
   }

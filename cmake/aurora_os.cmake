@@ -3,6 +3,7 @@ add_library(aurora_os STATIC
 	lib/dolphin/os/OSCache.cpp
 	lib/dolphin/os/OSBootInfo.cpp
 	lib/dolphin/os/OSTime.cpp
+	lib/dolphin/os/OSStopwatch.cpp
 	lib/dolphin/os/OSAlloc.cpp
 )
 

@@ -5,7 +5,9 @@
 #include "imgui.hpp"
 #include "webgpu/gpu.hpp"
 #endif
-#include "input.hpp"
+#include "gamepad.hpp"
+#include "input/router.hpp"
+#include "input/sdl_input.hpp"
 #include "internal.hpp"
 
 #include <aurora/aurora.h>
@@ -63,7 +65,7 @@ bool g_lastPaused = false;
 bool g_gotFocus = false;
 
 void update_mouse_pointer() {
-	input::set_mouse_pointer(0, 0, false);
+	gamepad::set_mouse_pointer(0, 0, false);
 	if (g_window == nullptr || SDL_GetMouseFocus() != g_window) {
 		return;
 	}
@@ -97,7 +99,7 @@ void update_mouse_pointer() {
 	}
 
 	const bool inside = x >= left && y >= top && x < left + width && y < top + height;
-	input::set_mouse_pointer(2 * (x - left) / width - 1, 2 * (y - top) / height - 1, inside);
+	gamepad::set_mouse_pointer(2 * (x - left) / width - 1, 2 * (y - top) / height - 1, inside);
 }
 
 
@@ -243,12 +245,13 @@ void process_event(SDL_Event& event) {
 	break;
   }
 
-  if (primaryWindow) {
+  const bool routed = primaryWindow && input::sdl::is_routed_event(event);
+  if (primaryWindow && !routed) {
 #ifdef AURORA_ENABLE_GX
     imgui::process_event(event);
 #endif
 #ifdef AURORA_ENABLE_RMLUI
-    rmlui::handle_event(event);
+    rmlui::handle_window_event(event);
 #endif
   }
 
@@ -286,7 +289,10 @@ void process_event(SDL_Event& event) {
     break;
   }
   case SDL_EVENT_GAMEPAD_ADDED: {
-    auto instance = input::add_controller(event.gdevice.which);
+    auto instance = gamepad::add_controller(event.gdevice.which);
+    if (instance != 0 && instance != static_cast<SDL_JoystickID>(-1)) {
+      input::sdl::gamepad_added(instance);
+    }
     g_events.push_back(AuroraEvent{
         .type = AURORA_CONTROLLER_ADDED,
         .controller = instance,
@@ -294,16 +300,25 @@ void process_event(SDL_Event& event) {
     break;
   }
   case SDL_EVENT_GAMEPAD_REMOVED: {
-    input::remove_controller(event.gdevice.which);
+    input::sdl::gamepad_removed(event.gdevice.which);
+    gamepad::remove_controller(event.gdevice.which);
     g_events.push_back(AuroraEvent{
         .type = AURORA_CONTROLLER_REMOVED,
         .controller = event.gdevice.which,
     });
     break;
   }
+  case SDL_EVENT_GAMEPAD_REMAPPED:
+    input::sdl::gamepad_remapped(event.gdevice.which);
+    break;
   case SDL_EVENT_MOUSE_WHEEL:
     if (primaryWindow) {
-      input::set_mouse_scroll(event.wheel.x, event.wheel.y);
+      gamepad::set_mouse_scroll(event.wheel.x, event.wheel.y);
+    }
+    break;
+  case SDL_EVENT_WINDOW_FOCUS_LOST:
+    if (primaryWindow) {
+      input::detail::focus_lost();
     }
     break;
   case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
@@ -335,6 +350,9 @@ void process_event(SDL_Event& event) {
     break;
   }
 
+  if (routed) {
+    input::sdl::dispatch(event);
+  }
   if (primaryWindow) {
     sync_paused();
   }
@@ -353,7 +371,7 @@ const AuroraEvent* poll_events() {
 
   SDL_Event event;
   // Clear out the previous scroll values to prevent ghost input
-  input::set_mouse_scroll(0, 0);
+  gamepad::set_mouse_scroll(0, 0);
   if (is_paused()) {
     ZoneScopedN("SDL_WaitEvent (paused)");
     if (SDL_WaitEvent(&event)) {
@@ -374,8 +392,9 @@ const AuroraEvent* poll_events() {
       break;
     }
   }
-	update_mouse_pointer();
-
+  input::reconcile();
+  input::sdl::update_cursor();
+  update_mouse_pointer();
   g_events.push_back(AuroraEvent{
       .type = AURORA_NONE,
   });
@@ -487,6 +506,11 @@ bool initialize() {
       SDL_HINT_SCREENSAVER_INHIBIT_ACTIVITY_NAME, SDL_GetError());
   TRY(SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_GAMECUBE_RUMBLE_BRAKE, "1"), "Error setting {}: {}",
       SDL_HINT_JOYSTICK_HIDAPI_GAMECUBE_RUMBLE_BRAKE, SDL_GetError());
+  // Treat touch and mouse as separate input sources
+  TRY(SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0"), "Error setting {}: {}", SDL_HINT_TOUCH_MOUSE_EVENTS,
+      SDL_GetError());
+  TRY(SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0"), "Error setting {}: {}", SDL_HINT_MOUSE_TOUCH_EVENTS,
+      SDL_GetError());
 
   TRY(SDL_DisableScreenSaver(), "Error disabling screensaver: {}", SDL_GetError());
   if (g_config.allowJoystickBackgroundEvents) {

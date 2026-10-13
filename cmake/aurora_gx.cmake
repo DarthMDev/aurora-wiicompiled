@@ -11,6 +11,10 @@ add_library(aurora_gx STATIC
         ${CMAKE_CURRENT_LIST_DIR}/../lib/gfx/encoding.cpp
         ${CMAKE_CURRENT_LIST_DIR}/../lib/gfx/frame.cpp
         ${CMAKE_CURRENT_LIST_DIR}/../lib/gfx/pipeline_cache.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/../lib/gfx/readback/copy_pack.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/../lib/gfx/readback/efb_gather.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/../lib/gfx/readback/gpu.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/../lib/gfx/readback/readback.cpp
         ${CMAKE_CURRENT_LIST_DIR}/../lib/gfx/recording.cpp
         ${CMAKE_CURRENT_LIST_DIR}/../lib/gfx/render_worker.cpp
         ${CMAKE_CURRENT_LIST_DIR}/../lib/gfx/resource_cache.cpp
@@ -29,6 +33,7 @@ add_library(aurora_gx STATIC
         ${CMAKE_CURRENT_LIST_DIR}/../lib/gx/gx.cpp
         ${CMAKE_CURRENT_LIST_DIR}/../lib/gx/texture.cpp
         ${CMAKE_CURRENT_LIST_DIR}/../lib/gx/pipeline.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/../lib/gx/readback.cpp
         ${CMAKE_CURRENT_LIST_DIR}/../lib/gx/shader.cpp
         ${CMAKE_CURRENT_LIST_DIR}/../lib/gx/shader_info.cpp
         ${CMAKE_CURRENT_LIST_DIR}/../lib/dolphin/gx/GXBump.cpp
@@ -65,8 +70,4 @@ if (AURORA_ENABLE_RMLUI)
         ${CMAKE_CURRENT_LIST_DIR}/../lib/rmlui/pipeline.cpp
         ${CMAKE_CURRENT_LIST_DIR}/../lib/rmlui/pipeline.hpp
     )
-endif ()
-
-if (AURORA_TARGET_RVL)
-	target_sources(aurora_gx PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../lib/revolution/gx/GXCull.cpp)
 endif ()

@@ -204,18 +204,6 @@ void* GXGetTexObjUserData(const GXTexObj* obj_) {
   return const_cast<void*>(obj->userData);
 }
 
-void GXGetTexObjAll(const GXTexObj* obj_, void** image, u16* width, u16* height, GXTexFmt* format,
-	GXTexWrapMode* wrapS, GXTexWrapMode* wrapT, GXBool* mipmap) {
-	const auto* obj = reinterpret_cast<const GXTexObj_*>(obj_);
-	*image = const_cast<void*>(obj->data);
-	*width = obj->mWidth;
-	*height = obj->mHeight;
-	*format = static_cast<GXTexFmt>(obj->mFormat);
-	*wrapS = static_cast<GXTexWrapMode>(obj->mode0 & 3);
-	*wrapT = static_cast<GXTexWrapMode>((obj->mode0 >> 2) & 3);
-	*mipmap = static_cast<GXBool>(obj->flags & 1);
-}
-
 void GXGetTexObjLODAll(const GXTexObj* obj_, GXTexFilter* minFilter, GXTexFilter* magFilter,
 	f32* minLOD, f32* maxLOD, f32* lodBias, GXBool* biasClamp, GXBool* edgeLOD, GXAnisotropy* aniso) {
 	const auto* obj = reinterpret_cast<const GXTexObj_*>(obj_);

@@ -1,12 +1,12 @@
 #include "command_processor.hpp"
 
-#include "../gfx/depth_peek.hpp"
 #include "../gfx/recording.hpp"
 #include "../internal.hpp"
 #include "dolphin/gd/GDGeometry.h"
 #include "dolphin/gx/GXAurora.h"
 #include "gx.hpp"
 #include "pipeline.hpp"
+#include "readback.hpp"
 #include "regs.hpp"
 #include "shader_info.hpp"
 #include "texture.hpp"
@@ -130,6 +130,7 @@ constexpr size_t MaxFogRangeLuts = 32;
 std::vector<FogRangeLutEntry> sFogRangeLuts;
 
 struct DrawCache {
+  uint64_t targetLayoutKey = 0;
   PipelineConfig config{};
   ShaderInfo shaderInfo{};
   gfx::PipelineRef pipelineRef{};
@@ -402,8 +403,9 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   }
 
   const u8 lineMode = line_mode_for_prim(prim);
+  const auto targetLayoutKey = gfx::get_render_target_layout().key;
   const bool pipelineValid = cache.hasPipeline && (state.dirty & DirtyPipeline) == 0 && cache.fmt == fmt &&
-                             cache.lineMode == lineMode && cache.config.msaaSamples == gfx::get_sample_count();
+                             cache.lineMode == lineMode && cache.targetLayoutKey == targetLayoutKey;
   if (!pipelineValid) {
     const bool hadPipeline = cache.hasPipeline;
     const auto prevSampledTextures = cache.shaderInfo.sampledTextures;
@@ -411,6 +413,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     populate_pipeline_config(cache.config, prim, fmt);
     cache.shaderInfo = build_shader_info(cache.config.shaderConfig);
     cache.pipelineRef = gfx::pipeline_ref(cache.config);
+    cache.targetLayoutKey = targetLayoutKey;
     cache.fmt = fmt;
     cache.lineMode = lineMode;
     cache.hasPipeline = true;
@@ -463,6 +466,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   cache.lastDrawFmt = fmt;
   gfx::push_draw_command(DrawData{
       .pipeline = cache.pipelineRef,
+      .bindGroups = cache.bindGroups,
       .vertRange = vertRange,
       .idxRange = idxRange,
       .uniformRange = cache.uniformRange,
@@ -470,7 +474,6 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .vtxCount = vtxCount,
       .indexCount = numIndices,
       .instanceCount = instanceCount,
-      .bindGroups = cache.bindGroups,
       .dstAlpha = state.dstAlpha,
   });
 }
@@ -707,6 +710,12 @@ void handle_aurora(ByteReader& reader) noexcept {
       g_gxState.clamp = clamp;
       g_gxState.dirty |= DirtyPipeline;
     }
+  } else if (subCmd == GX_AURORA_SET_DRAWS_BLOCKING) {
+    const bool blocking = reader.read<u8>() != 0;
+    if (g_gxState.drawsBlocking != blocking) {
+      g_gxState.drawsBlocking = blocking;
+      g_gxState.dirty |= DirtyPipeline;
+    }
   } else if (subCmd == GX_AURORA_LOAD_COPY_SRC) {
     const s32 left = reader.read<s32>();
     const s32 top = reader.read<s32>();
@@ -721,8 +730,10 @@ void handle_aurora(ByteReader& reader) noexcept {
     g_gxState.texCopyDstWide = true;
   } else if (subCmd == GX_AURORA_LOAD_COPY_DEST) {
     g_gxState.texCopyDest = reinterpret_cast<const void*>(reader.read<u64>());
-  } else if (subCmd == GX_AURORA_REQUEST_DEPTH_SNAPSHOT) {
-    gfx::depth_peek::request_snapshot();
+  } else if (subCmd == GX_AURORA_READBACK_CAPTURE_PEEKS) {
+    readback::handle_capture_peeks(reader);
+  } else if (subCmd == GX_AURORA_READBACK_CAPTURE_COPIES) {
+    readback::handle_capture_copies(reader);
   } else if (subCmd == GX_AURORA_BEGIN_OFFSCREEN) {
     const u32 width = reader.read<u32>();
     const u32 height = reader.read<u32>();
