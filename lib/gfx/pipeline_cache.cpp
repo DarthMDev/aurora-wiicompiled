@@ -92,6 +92,7 @@ static std::atomic_bool g_pipelineThreadEnd = false;
 static std::condition_variable g_pipelineQueueCv;
 static std::condition_variable g_pipelineReadyCv;
 static absl::flat_hash_map<PipelineRef, CompiledPipeline> g_pipelines;
+static absl::flat_hash_set<PipelineRef> g_requiredPipelines;
 static absl::flat_hash_map<HashType, KnownPipeline> g_knownPipelines;
 static std::optional<uint64_t> g_pipelineLayoutKey;
 static std::deque<PendingPipeline> g_pipelineQueue;
@@ -400,7 +401,7 @@ static auto find_pending_pipeline(Queue& queue, PipelineRef hash) {
 enum class PipelinePriority {
   Background, // cache warmup
   Normal,     // async skip draw
-  Blocking,   // block until compiled
+  Blocking,   // wait for compilation before encoding the draw
 };
 
 static void promote_pending_pipeline(PipelineRef hash, PipelinePriority priority) {
@@ -470,23 +471,26 @@ static PipelineRef find_pipeline_impl(PipelineRef runtimeKey, NewPipelineCallbac
 
   const bool blocking = priority == PipelinePriority::Blocking;
   bool notifyWorker = false;
-  bool pipelineReady = false;
   bool createdPipeline = false;
   uint32_t pipelineCount = 0;
   bool queued = false;
   {
     std::scoped_lock guard{g_pipelineMutex};
-    auto pipelineIt = g_pipelines.find(runtimeKey);
-    if (pipelineIt != g_pipelines.end()) {
-      pipelineReady = true;
-    } else if (g_pendingPipelines.contains(runtimeKey)) {
+    if (g_pipelines.contains(runtimeKey)) {
+      return runtimeKey;
+    }
+
+    if (blocking) {
+      g_requiredPipelines.insert(runtimeKey);
+    }
+
+    if (g_pendingPipelines.contains(runtimeKey)) {
       if (blocking && !g_hasPipelineThread) {
         auto pending = take_pending_pipeline(runtimeKey);
         if (pending) {
           auto result = pending->create();
           pipelineCount = result.pipeline_count();
           g_pipelines.try_emplace(runtimeKey, std::move(result));
-          pipelineReady = true;
           g_pipelinesPerFrame += std::max(1u, pipelineCount);
           createdPipeline = true;
           queued = true;
@@ -499,7 +503,6 @@ static PipelineRef find_pipeline_impl(PipelineRef runtimeKey, NewPipelineCallbac
       auto result = cb();
       pipelineCount = result.pipeline_count();
       g_pipelines.try_emplace(runtimeKey, std::move(result));
-      pipelineReady = true;
       g_pipelinesPerFrame += std::max(1u, pipelineCount);
       createdPipeline = true;
     } else {
@@ -515,7 +518,7 @@ static PipelineRef find_pipeline_impl(PipelineRef runtimeKey, NewPipelineCallbac
         g_pipelineQueue.emplace_back(std::move(pending));
         break;
       case PipelinePriority::Blocking:
-        g_pipelineQueue.emplace_front(std::move(pending));
+        g_pipelineQueue.emplace_back(std::move(pending));
         break;
       }
       g_pendingPipelines.insert(runtimeKey);
@@ -532,10 +535,8 @@ static PipelineRef find_pipeline_impl(PipelineRef runtimeKey, NewPipelineCallbac
     g_pipelineQueueCv.notify_one();
   }
 
-  if (blocking && !pipelineReady) {
-    std::unique_lock lock{g_pipelineMutex};
-    g_pipelineReadyCv.wait(lock, [=] { return g_pipelines.contains(runtimeKey) || g_pipelineThreadEnd; });
-  }
+  // Queue the whole recorded pass before waiting. Encoding still waits for
+  // required pipelines, so compilation can overlap without dropping draws.
   return runtimeKey;
 }
 
@@ -1199,6 +1200,7 @@ void shutdown_pipeline_cache() {
   g_pipelinesPerFrame = 0;
   g_gpuCachePrunePending = false;
   g_pipelines.clear();
+  g_requiredPipelines.clear();
   g_knownPipelines.clear();
   g_pipelineLayoutKey.reset();
   g_pipelineQueue.clear();
@@ -1225,7 +1227,11 @@ void end_pipeline_frame() {
 }
 
 bool get_pipeline(PipelineRef ref, CompiledPipeline& pipeline) {
-  std::lock_guard guard{g_pipelineMutex};
+  std::unique_lock guard{g_pipelineMutex};
+  if (g_requiredPipelines.contains(ref)) {
+    g_pipelineReadyCv.wait(guard, [=] { return g_pipelines.contains(ref) || g_pipelineThreadEnd; });
+  }
+
   const auto it = g_pipelines.find(ref);
   if (it == g_pipelines.end() || !it->second.main) {
     return false;
