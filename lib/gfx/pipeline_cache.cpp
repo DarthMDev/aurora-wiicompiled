@@ -975,17 +975,15 @@ static void pipeline_worker() {
   tracy::SetThreadName("Pipeline compilation thread");
 #endif
 
-  bool hasMore = false;
   while (g_hasPipelineThread || g_pipelinesPerFrame < BuildPipelinesPerFrame) {
     PendingPipeline pending;
     {
       std::unique_lock lock{g_pipelineMutex};
       if (g_hasPipelineThread) {
-        if (!hasMore) {
-          g_pipelineQueueCv.wait(lock, [] {
-            return !g_pipelineQueue.empty() || !g_backgroundPipelineQueue.empty() || g_pipelineThreadEnd;
-          });
-        }
+        // Another worker may have consumed the remaining jobs since our last iteration.
+        g_pipelineQueueCv.wait(lock, [] {
+          return !g_pipelineQueue.empty() || !g_backgroundPipelineQueue.empty() || g_pipelineThreadEnd;
+        });
       } else if (g_pipelineQueue.empty() && g_backgroundPipelineQueue.empty()) {
         return;
       }
@@ -1002,7 +1000,6 @@ static void pipeline_worker() {
       std::lock_guard lock{g_pipelineMutex};
       g_pipelines.try_emplace(pending.hash, std::move(result));
       g_pendingPipelines.erase(pending.hash);
-      hasMore = !g_pipelineQueue.empty() || !g_backgroundPipelineQueue.empty();
     }
     if (!g_hasPipelineThread) {
       g_pipelinesPerFrame += std::max(1u, pipelineCount);
@@ -1181,7 +1178,10 @@ void initialize_pipeline_cache() {
 
 void shutdown_pipeline_cache() {
   if (g_hasPipelineThread) {
-    g_pipelineThreadEnd = true;
+    {
+      std::lock_guard lock{g_pipelineMutex};
+      g_pipelineThreadEnd = true;
+    }
     g_pipelineQueueCv.notify_all();
     g_pipelineReadyCv.notify_all();
 
