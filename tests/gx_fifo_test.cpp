@@ -3623,10 +3623,10 @@ TEST_F(GXFifoTest, PeekZ_FallsBackToZeroAndRequestsSnapshot) {
   GXPeekZ(10, 20, &z);
 
   EXPECT_EQ(z, 0u);
-  EXPECT_FALSE(aurora::gfx::depth_peek::testing::snapshot_requested());
+  EXPECT_TRUE(aurora::gfx::depth_peek::testing::snapshot_requested());
 
   auto bytes = capture_fifo();
-  EXPECT_TRUE(has_aurora_cmd(bytes, GX_AURORA_REQUEST_DEPTH_SNAPSHOT));
+  EXPECT_FALSE(has_aurora_cmd(bytes, GX_AURORA_REQUEST_DEPTH_SNAPSHOT));
   decode_fifo(bytes);
   EXPECT_TRUE(aurora::gfx::depth_peek::testing::snapshot_requested());
 }
@@ -3638,7 +3638,7 @@ TEST_F(GXFifoTest, PeekZ_ReturnsLatestCompletedSnapshot) {
   GXPeekZ(1, 1, &z);
 
   EXPECT_EQ(z, 0x000004u);
-  EXPECT_FALSE(aurora::gfx::depth_peek::testing::snapshot_requested());
+  EXPECT_TRUE(aurora::gfx::depth_peek::testing::snapshot_requested());
 
   auto bytes = capture_fifo();
   decode_fifo(bytes);
@@ -3653,7 +3653,7 @@ TEST_F(GXFifoTest, PeekZ_OutOfRangeFallsBackToZero) {
   GXPeekZ(1, 0, &z);
 
   EXPECT_EQ(z, 0u);
-  EXPECT_FALSE(aurora::gfx::depth_peek::testing::snapshot_requested());
+  EXPECT_TRUE(aurora::gfx::depth_peek::testing::snapshot_requested());
 
   auto bytes = capture_fifo();
   decode_fifo(bytes);

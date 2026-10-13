@@ -1,3 +1,4 @@
+#include "video.hpp"
 #include "window.hpp"
 
 #ifdef AURORA_ENABLE_GX
@@ -29,11 +30,14 @@ extern "C" void Android_UnlockActivityMutex(void);
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <deque>
 #include <string>
 #include <vector>
 
+#ifdef AURORA_ENABLE_RMLUI
 #include "rmlui.hpp"
+#endif
 #include "time_internal.hpp"
 #include "dolphin/vi/vi_internal.hpp"
 
@@ -45,6 +49,7 @@ SDL_Window* g_window;
 SDL_Renderer* g_renderer;
 float g_frameBufferScale = 0.f;
 bool g_frameBufferAspectFit = false;
+float g_frameBufferAspect = 0.f;
 AuroraWindowSize g_windowSize;
 std::vector<AuroraEvent> g_events;
 std::deque<std::string> g_eventStrings;
@@ -56,6 +61,45 @@ std::atomic_bool g_surfaceReady = true;
 #endif
 bool g_lastPaused = false;
 bool g_gotFocus = false;
+
+void update_mouse_pointer() {
+	input::set_mouse_pointer(0, 0, false);
+	if (g_window == nullptr || SDL_GetMouseFocus() != g_window) {
+		return;
+	}
+
+	const auto size = get_window_size();
+	if (size.width == 0 || size.height == 0 || size.native_fb_width == 0 || size.native_fb_height == 0) {
+		return;
+	}
+
+	float x = 0;
+	float y = 0;
+	SDL_GetMouseState(&x, &y);
+	x *= static_cast<float>(size.native_fb_width) / size.width;
+	y *= static_cast<float>(size.native_fb_height) / size.height;
+
+	float left = 0;
+	float top = 0;
+	float width = static_cast<float>(size.native_fb_width);
+	float height = static_cast<float>(size.native_fb_height);
+#ifdef AURORA_ENABLE_GX
+	const auto& source = webgpu::present_source();
+	const auto viewport = webgpu::calculate_present_viewport(size.native_fb_width, size.native_fb_height,
+		source.size.width, source.size.height);
+	left = viewport.left;
+	top = viewport.top;
+	width = viewport.width;
+	height = viewport.height;
+#endif
+	if (width <= 0 || height <= 0) {
+		return;
+	}
+
+	const bool inside = x >= left && y >= top && x < left + width && y < top + height;
+	input::set_mouse_pointer(2 * (x - left) / width - 1, 2 * (y - top) / height - 1, inside);
+}
+
 
 void retain_event_strings(SDL_Event& event) {
   switch (event.type) {
@@ -179,6 +223,26 @@ void sync_paused() {
 
 void process_event(SDL_Event& event) {
   const bool primaryWindow = targets_primary_window(&event);
+  switch (event.type) {
+  case SDL_EVENT_KEY_DOWN:
+  case SDL_EVENT_KEY_UP:
+  case SDL_EVENT_MOUSE_MOTION:
+  case SDL_EVENT_MOUSE_BUTTON_DOWN:
+  case SDL_EVENT_MOUSE_BUTTON_UP:
+  case SDL_EVENT_MOUSE_WHEEL:
+	if (primaryWindow) {
+		video::notify_input();
+	}
+	break;
+  case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+  case SDL_EVENT_GAMEPAD_BUTTON_UP:
+  case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+	video::notify_input();
+	break;
+  default:
+	break;
+  }
+
   if (primaryWindow) {
 #ifdef AURORA_ENABLE_GX
     imgui::process_event(event);
@@ -310,6 +374,8 @@ const AuroraEvent* poll_events() {
       break;
     }
   }
+	update_mouse_pointer();
+
   g_events.push_back(AuroraEvent{
       .type = AURORA_NONE,
   });
@@ -462,15 +528,19 @@ AuroraWindowSize get_window_size() {
     fb_w = scaledW;
     fb_h = scaledH;
   }
-  if (g_frameBufferAspectFit) {
-    const auto [baseW, baseH] = vi::configured_fb_size();
-    if (baseW > 0 && baseH > 0) {
-      const auto [fitW, fitH] =
-          fit_frame_buffer_to_aspect(fb_w, fb_h, static_cast<float>(baseW) / static_cast<float>(baseH));
-      fb_w = fitW;
-      fb_h = fitH;
-    }
-  }
+	float aspect = g_frameBufferAspect;
+	if (aspect == 0.f && g_frameBufferAspectFit) {
+		const auto [baseW, baseH] = vi::configured_fb_size();
+		if (baseW > 0 && baseH > 0) {
+			aspect = static_cast<float>(baseW) / static_cast<float>(baseH);
+		}
+	}
+
+	if (aspect > 0.f) {
+		const auto [fitW, fitH] = fit_frame_buffer_to_aspect(fb_w, fb_h, aspect);
+		fb_w = fitW;
+		fb_h = fitH;
+	}
 
   const float scale = SDL_GetWindowDisplayScale(g_window);
   return {
@@ -585,6 +655,15 @@ void set_frame_buffer_aspect_fit(bool fit) {
 
   g_frameBufferAspectFit = fit;
   request_frame_buffer_resize();
+}
+
+void set_frame_buffer_aspect(float aspect) {
+	if (!std::isfinite(aspect) || aspect < 0.f || g_frameBufferAspect == aspect) {
+		return;
+	}
+
+	g_frameBufferAspect = aspect;
+	request_frame_buffer_resize();
 }
 
 void set_background_input(bool value) { SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, value ? "1" : "0"); }

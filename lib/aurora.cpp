@@ -1,5 +1,7 @@
 #include <aurora/aurora.h>
 #include <aurora/time.hpp>
+#include "audio.hpp"
+#include "video.hpp"
 
 #ifdef AURORA_ENABLE_GX
 #include "gfx/resources.hpp"
@@ -128,6 +130,10 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   }
   AURORA_ASSERT(window::initialize(), "Error initializing window");
 
+  if (!audio::initialize()) {
+    Log.warn("Error initializing audio: {}", SDL_GetError());
+  }
+
   g_sdlCustomEventsStart = SDL_RegisterEvents(2);
   AURORA_ASSERT(g_sdlCustomEventsStart, "Failed to allocate user events: {}", SDL_GetError());
   AURORA_ASSERT(window::initialize_event_watch(), "Error initializing SDL event watch");
@@ -207,6 +213,8 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
 }
 
 void shutdown() noexcept {
+  video::shutdown();
+  audio::shutdown();
 #ifdef AURORA_ENABLE_GX
   gx::fifo::shutdown();
   gfx::render_worker::synchronize();
@@ -287,9 +295,21 @@ void end_frame() noexcept {
   }
 #endif
 
-  gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport,
+  const bool black = video::is_black();
+  const float brightness = video::brightness();
+  gfx::end_frame([black, brightness, rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport,
                   imguiDrawData = std::move(imguiDrawData)](
                      wgpu::CommandEncoder& encoder, std::vector<gfx::AfterSubmitCallback> afterSubmitCallbacks) {
+		const auto presentMode = webgpu::g_graphicsConfig.surfaceConfiguration.presentMode;
+		if (presentMode == wgpu::PresentMode::Fifo || presentMode == wgpu::PresentMode::FifoRelaxed) {
+			const wgpu::CommandBufferDescriptor sceneDescriptor{.label = "Scene command buffer"};
+			const auto sceneCommands = encoder.Finish(&sceneDescriptor);
+			g_queue.Submit(1, &sceneCommands);
+
+			const wgpu::CommandEncoderDescriptor presentDescriptor{.label = "Present encoder"};
+			encoder = g_device.CreateCommandEncoder(&presentDescriptor);
+		}
+
     wgpu::Texture currentTexture;
     wgpu::TextureView currentView;
     auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
@@ -332,12 +352,20 @@ void end_frame() noexcept {
         };
         const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
         // Copy EFB -> XFB (swapchain)
-        pass.SetPipeline(webgpu::g_CopyPipeline);
+        if (brightness < 1.0f) {
+			pass.SetPipeline(webgpu::g_CopyDimmedPipeline);
+			const wgpu::Color blend{brightness, brightness, brightness, 1.0};
+			pass.SetBlendConstant(&blend);
+		} else {
+			pass.SetPipeline(webgpu::g_CopyPipeline);
+		}
         pass.SetBindGroup(0, presentBindGroup, 0, nullptr);
         set_present_viewport(pass, viewport, webgpu::g_graphicsConfig.surfaceConfiguration.width,
                              webgpu::g_graphicsConfig.surfaceConfiguration.height);
 
-        pass.Draw(3);
+        if (!black) {
+          pass.Draw(3);
+        }
         if (rmlBindGroup && rmlOverlay) {
           pass.SetPipeline(webgpu::g_CopyPremultipliedAlphaPipeline);
           pass.SetBindGroup(0, rmlBindGroup, 0, nullptr);

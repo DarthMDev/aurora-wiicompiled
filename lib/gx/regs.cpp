@@ -133,13 +133,25 @@ void bp_tev_ind(u8 reg, u32 value) noexcept {
 void bp_scissor(u8, u32) noexcept {
   const u32 scis0 = g_gxState.bpRegCache[0x20];
   const u32 scis1 = g_gxState.bpRegCache[0x21];
-  const s32 tp = static_cast<s32>(reg_get(scis0, 11, 0)) - 342;
-  const s32 lf = static_cast<s32>(reg_get(scis0, 11, 12)) - 342;
-  const s32 bm = static_cast<s32>(reg_get(scis1, 11, 0)) - 342;
-  const s32 rt = static_cast<s32>(reg_get(scis1, 11, 12)) - 342;
+  const s32 tp = static_cast<s32>(reg_get(scis0, 11, 0)) - g_gxState.scissorOffsetY;
+  const s32 lf = static_cast<s32>(reg_get(scis0, 11, 12)) - g_gxState.scissorOffsetX;
+  const s32 bm = static_cast<s32>(reg_get(scis1, 11, 0)) - g_gxState.scissorOffsetY;
+  const s32 rt = static_cast<s32>(reg_get(scis1, 11, 12)) - g_gxState.scissorOffsetX;
   const s32 wd = std::max(rt - lf + 1, 0);
   const s32 ht = std::max(bm - tp + 1, 0);
   set_logical_scissor({lf, tp, wd, ht});
+}
+
+void bp_scissor_offset(u8, u32 value) noexcept {
+	const s32 x = static_cast<s32>(reg_get(value, 10, 0)) * 2;
+	const s32 y = static_cast<s32>(reg_get(value, 10, 10)) * 2;
+	auto viewport = g_gxState.logicalViewport;
+	viewport.left += g_gxState.scissorOffsetX - x;
+	viewport.top += g_gxState.scissorOffsetY - y;
+	g_gxState.scissorOffsetX = x;
+	g_gxState.scissorOffsetY = y;
+	set_logical_viewport(viewport);
+	bp_scissor(0, 0);
 }
 
 // Line/point size (0x22)
@@ -438,6 +450,15 @@ void bp_fog_color(u8, u32 value) noexcept {
   };
 }
 
+void bp_z_texture_bias(u8, u32 value) noexcept {
+	g_gxState.zTextureBias = value & 0xFFFFFF;
+}
+
+void bp_z_texture_control(u8, u32 value) noexcept {
+	g_gxState.zTextureFormat = reg_get(value, 2, 0);
+	g_gxState.zTextureOp = reg_get(value, 2, 2);
+}
+
 // Alpha compare (0xF3)
 void bp_alpha_compare(u8, u32 value) noexcept {
   g_gxState.alphaCompare.ref0 = reg_get(value, 8, 0);
@@ -484,6 +505,11 @@ void bp_tex(u8 reg, u32 value) noexcept {
     break;
   case 1: // Mode1
     slot.mode1 = value;
+	if (reg_get(value, 8, 8) != 0) {
+		slot.flags |= 1;
+	} else {
+		slot.flags &= ~1u;
+	}
     break;
   case 2: // Image0
     slot.image0 = value;
@@ -494,6 +520,9 @@ void bp_tex(u8 reg, u32 value) noexcept {
   case 5: // Image3
     slot.image3 = value;
     break;
+  case 6:
+	slot.tlut = static_cast<GXTlut>(reg_get(value, 10, 0));
+	break;
   default:
     break;
   }
@@ -523,6 +552,7 @@ constexpr auto kBpRegs = [] {
   }
   regs[0x20] = {bp_scissor};
   regs[0x21] = {bp_scissor};
+	regs[0x59] = {bp_scissor_offset};
   regs[0x22] = {bp_line_point_size, DirtyUniform};
   regs[0x25] = {bp_ind_scale, DirtyPipeline};
   regs[0x26] = {bp_ind_scale, DirtyPipeline};
@@ -537,6 +567,8 @@ constexpr auto kBpRegs = [] {
   regs[0x41] = {bp_cmode0, DirtyPipeline};
   regs[0x42] = {bp_cmode1, DirtyPipeline};
   regs[0x43] = {bp_pe_ctrl};
+  regs[0x47] = {};
+  regs[0x48] = {};
   regs[0x4F] = {bp_clear_ra};
   regs[0x50] = {bp_clear_bg};
   regs[0x51] = {bp_clear_depth};
@@ -551,7 +583,7 @@ constexpr auto kBpRegs = [] {
       regs[base + 0x0C + i] = {};                      // Image1 (GXTexRegion)
       regs[base + 0x10 + i] = {};                      // Image2 (GXTexRegion)
       regs[base + 0x14 + i] = {bp_tex, DirtyTextures}; // Image3
-      regs[base + 0x18 + i] = {};                      // TLUT region TMEM offset
+      regs[base + 0x18 + i] = {bp_tex, DirtyTextures};                      // TLUT region TMEM offset
     }
   }
   for (u8 r = 0xC0; r <= 0xDE; r += 2) {
@@ -570,6 +602,8 @@ constexpr auto kBpRegs = [] {
   regs[0xF0] = {bp_fog2, DirtyUniform};
   regs[0xF1] = {bp_fog3, DirtyPipeline | DirtyUniform}; // fog.type affects shader
   regs[0xF2] = {bp_fog_color, DirtyUniform};
+	regs[0xF4] = {bp_z_texture_bias, DirtyUniform};
+	regs[0xF5] = {bp_z_texture_control, DirtyPipeline | DirtyUniform};
   regs[0xF3] = {bp_alpha_compare, DirtyPipeline};
   for (u8 r = 0xF6; r <= 0xFD; ++r) {
     regs[r] = {bp_ksel, DirtyPipeline};
@@ -870,28 +904,29 @@ bool xf_reg_unchanged(u32 reg, u32 val) noexcept {
   return false;
 }
 
-// Updates every shadow register in the block and returns true only if all words matched
-bool xf_block_unchanged(u32 firstReg, const u8* data, u32 count) noexcept {
-  bool unchanged = true;
-  for (u32 w = 0; w < count; w++) {
-    unchanged &= xf_reg_unchanged(firstReg + w, read_bits<u32>(data + w * 4));
-  }
-  return unchanged;
+bool xf_block_valid(u32 firstReg, u32 count) noexcept {
+	for (u32 w = 0; w < count; ++w) {
+		if (!g_gxState.xfRegValid.test(firstReg + w)) {
+			return false;
+		}
+	}
+
+	return true;
 }
 
 // Viewport (0x101A-0x101F)
-void xf_load_viewport(const u8* data) noexcept {
-  f32 sx = read_bits<f32>(data + 0);
-  f32 sy = read_bits<f32>(data + 4);
-  f32 sz = read_bits<f32>(data + 8);
-  f32 ox = read_bits<f32>(data + 12);
-  f32 oy = read_bits<f32>(data + 16);
-  f32 oz = read_bits<f32>(data + 20);
+void xf_load_viewport() noexcept {
+  f32 sx = std::bit_cast<f32>(g_gxState.xfRegCache[0x1A]);
+  f32 sy = std::bit_cast<f32>(g_gxState.xfRegCache[0x1B]);
+  f32 sz = std::bit_cast<f32>(g_gxState.xfRegCache[0x1C]);
+  f32 ox = std::bit_cast<f32>(g_gxState.xfRegCache[0x1D]);
+  f32 oy = std::bit_cast<f32>(g_gxState.xfRegCache[0x1E]);
+  f32 oz = std::bit_cast<f32>(g_gxState.xfRegCache[0x1F]);
   f32 width = sx * 2.0f;
   f32 height = -sy * 2.0f;
   set_logical_viewport({
-      .left = ox - 340.0f - width / 2.0f,
-      .top = oy - 340.0f - height / 2.0f,
+      .left = ox + 2.0f - g_gxState.scissorOffsetX - width / 2.0f,
+      .top = oy + 2.0f - g_gxState.scissorOffsetY - height / 2.0f,
       .width = width,
       .height = height,
       .znear = (oz - sz) / 1.6777215e7f,
@@ -900,14 +935,14 @@ void xf_load_viewport(const u8* data) noexcept {
 }
 
 // Projection (0x1020-0x1026)
-void xf_load_projection(const u8* data) noexcept {
-  f32 p0 = read_bits<f32>(data + 0);
-  f32 p1 = read_bits<f32>(data + 4);
-  f32 p2 = read_bits<f32>(data + 8);
-  f32 p3 = read_bits<f32>(data + 12);
-  f32 p4 = read_bits<f32>(data + 16);
-  f32 p5 = read_bits<f32>(data + 20);
-  u32 projType = read_bits<u32>(data + 24);
+void xf_load_projection() noexcept {
+  f32 p0 = std::bit_cast<f32>(g_gxState.xfRegCache[0x20]);
+  f32 p1 = std::bit_cast<f32>(g_gxState.xfRegCache[0x21]);
+  f32 p2 = std::bit_cast<f32>(g_gxState.xfRegCache[0x22]);
+  f32 p3 = std::bit_cast<f32>(g_gxState.xfRegCache[0x23]);
+  f32 p4 = std::bit_cast<f32>(g_gxState.xfRegCache[0x24]);
+  f32 p5 = std::bit_cast<f32>(g_gxState.xfRegCache[0x25]);
+  u32 projType = g_gxState.xfRegCache[0x26];
   g_gxState.projType = static_cast<GXProjectionType>(projType);
   auto& proj = g_gxState.proj;
   proj = {};
@@ -1139,28 +1174,11 @@ void handle_xf(u16 addr, std::span<const u8> data) noexcept {
 
   // XF registers (0x1000+)
   const u32 xfAddr = addr - 0x1000;
+  bool viewportWritten = false;
+  bool projectionChanged = false;
   for (u32 i = 0; i < count; i++) {
     const u32 reg = xfAddr + i;
     const u8* wordData = xfData + i * 4;
-
-    // Viewport mapping depends on the current render target
-    if (reg == 0x1A && count - i >= 6) {
-      xf_load_viewport(wordData);
-      i += 5;
-      continue;
-    }
-    // Projection depends only on its XF block, so identical loads can dedupe
-    if (reg == 0x20 && count - i >= 7) {
-      if (!xf_block_unchanged(0x20, wordData, 7)) {
-        xf_load_projection(wordData);
-      }
-      i += 6;
-      continue;
-    }
-    if (reg >= 0x1A && reg <= 0x26) {
-      // Do not shadow unsupported partial blocks
-      continue;
-    }
 
     const u32 val = read_bits<u32>(wordData);
     if (reg >= XfRegCount) {
@@ -1169,7 +1187,16 @@ void handle_xf(u16 addr, std::span<const u8> data) noexcept {
 #endif
       continue;
     }
-    if (xf_reg_unchanged(reg, val)) {
+    const bool unchanged = xf_reg_unchanged(reg, val);
+    if (reg >= 0x1A && reg <= 0x1F) {
+      viewportWritten = true;
+      continue;
+    }
+    if (reg >= 0x20 && reg <= 0x26) {
+      projectionChanged |= !unchanged;
+      continue;
+    }
+    if (unchanged) {
       continue;
     }
     const RegHandler& info = kXfRegs[reg];
@@ -1177,6 +1204,13 @@ void handle_xf(u16 addr, std::span<const u8> data) noexcept {
     if (info.decode != nullptr) {
       info.decode(static_cast<u8>(reg), val);
     }
+  }
+
+  if (viewportWritten && xf_block_valid(0x1A, 6)) {
+    xf_load_viewport();
+  }
+  if (projectionChanged && xf_block_valid(0x20, 7)) {
+    xf_load_projection();
   }
 }
 
