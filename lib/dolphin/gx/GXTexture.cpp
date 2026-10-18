@@ -416,9 +416,7 @@ void GXLoadTlut(const GXTlutObj* obj_, u32 idx) {
 // TODO GXInitTlutRegion
 // TODO GXInvalidateTexRegion
 
-void GXInvalidateTexAll() {
-  // no-op?
-}
+void GXInvalidateTexAll() { GX_WRITE_AURORA(GX_AURORA_INVALIDATE_TEX_ALL); }
 
 // TODO GXPreLoadEntireTexture
 // TODO GXSetTexRegionCallback

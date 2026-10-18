@@ -1,6 +1,7 @@
 #include "texture.hpp"
 
 #include "../gfx/lru_cache.hpp"
+#include "../gfx/presentation.hpp"
 #include "../gfx/recording.hpp"
 #include "../gfx/tex_copy_conv.hpp"
 #include "../gfx/tex_palette_conv.hpp"
@@ -45,6 +46,13 @@ struct DynamicPaletteEntry {
   uint64_t lastUsedFrame = 0;
 };
 
+// Digest of guest source bytes plus the guest write generation sampled before hashing them.
+struct SourceStamp {
+  XXH128_hash_t digest{};
+  uint64_t generation = AURORA_GUEST_WRITE_UNTRACKED;
+  bool valid = false;
+};
+
 struct CachedTextureEntry {
   gfx::TextureHandle handle;
   u32 texDataVersion = 0;
@@ -52,11 +60,16 @@ struct CachedTextureEntry {
   u32 tlutDataVersion = 0;
   uint64_t replacementId = 0;
   uint64_t lastUsedFrame = 0;
+  uint64_t validationRevision = 0;
+  SourceStamp texture;
+  SourceStamp tlut;
 };
 
 struct CachedTlutTextureEntry {
   gfx::TextureHandle handle;
   u32 tlutDataVersion = 0;
+  uint64_t validationRevision = 0;
+  SourceStamp source;
 };
 
 struct TlutObjectCache {
@@ -129,6 +142,8 @@ uint64_t s_frameCount = 0;
 uint64_t s_bindGeneration = 1;
 std::atomic<uint64_t> s_pendingInvalidations = 0;
 std::atomic<uint64_t> s_pendingCacheClears = 0;
+uint64_t s_validationRevision = 1;
+bool s_validationRevisionUsed = false;
 
 #if DEBUG
 constexpr bool BuildSourceKeyForDebug = true;
@@ -194,8 +209,50 @@ void clear_texture_dependency(u32 texObjId, const CachedTextureEntry& entry) {
   clear_texture_dependency(texObjId, entry.tlutObjId, entry.replacementId);
 }
 
+uint64_t source_generation(const void* data, size_t size) noexcept {
+  return gfx::presentation::guest_write_generation(data, size);
+}
+
+SourceStamp make_stamp(const XXH128_hash_t& digest, uint64_t generation) noexcept {
+  return {.digest = digest, .generation = generation, .valid = true};
+}
+
+// A stamp whose write generation is unchanged skips the digest; untracked sources are always re-hashed.
+bool source_unchanged(const void* data, size_t size, SourceStamp& stamp) noexcept {
+  if (!stamp.valid) {
+    return true;
+  }
+  const uint64_t generation = source_generation(data, size);
+  if (generation != AURORA_GUEST_WRITE_UNTRACKED && generation == stamp.generation) {
+    return true;
+  }
+  const XXH128_hash_t digest = XXH3_128bits(data, size);
+  s_stats.hashedBytes += size;
+  if (!XXH128_isEqual(digest, stamp.digest)) {
+    return false;
+  }
+  stamp.generation = generation;
+  return true;
+}
+
+bool validate_texture_entry(CachedTextureEntry& entry, const GXTexObj_& obj, const GXTlutObj_* tlut) noexcept {
+  if (entry.validationRevision == s_validationRevision) {
+    return true;
+  }
+  const size_t textureBytes = texture::texture_source_size(obj.format(), obj.width(), obj.height(), obj.mip_count());
+  if (!source_unchanged(obj.data, textureBytes, entry.texture)) {
+    return false;
+  }
+  if (tlut != nullptr && !source_unchanged(tlut->data, texture::tlut_source_size(tlut->numEntries), entry.tlut)) {
+    return false;
+  }
+  entry.validationRevision = s_validationRevision;
+  s_validationRevisionUsed = true;
+  return true;
+}
+
 void store_cached_texture(const GXTexObj_& obj, gfx::TextureHandle handle, u32 tlutObjId = 0, u32 tlutDataVersion = 0,
-                          uint64_t replacementId = 0) {
+                          uint64_t replacementId = 0, SourceStamp textureStamp = {}, SourceStamp tlutStamp = {}) {
   if (obj.texObjId == 0) {
     return;
   }
@@ -211,6 +268,10 @@ void store_cached_texture(const GXTexObj_& obj, gfx::TextureHandle handle, u32 t
   entry.tlutDataVersion = tlutDataVersion;
   entry.replacementId = replacementId;
   entry.lastUsedFrame = s_frameCount;
+  entry.validationRevision = s_validationRevision;
+  entry.texture = textureStamp;
+  entry.tlut = tlutStamp;
+  s_validationRevisionUsed = true;
 
   if (tlutObjId != 0) {
     auto& cache = s_tlutObjectCaches[tlutObjId];
@@ -363,8 +424,16 @@ gfx::TextureHandle get_tlut_texture(const GXTlutObj_& tlut) {
   if (tlut.tlutObjId != 0) {
     auto& cache = s_tlutObjectCaches[tlut.tlutObjId];
     cache.lastUsedFrame = s_frameCount;
-    if (cache.tlutTexture.handle && cache.tlutTexture.tlutDataVersion == tlut.tlutDataVersion) {
-      return cache.tlutTexture.handle;
+    auto& cached = cache.tlutTexture;
+    if (cached.handle && cached.tlutDataVersion == tlut.tlutDataVersion) {
+      if (cached.validationRevision == s_validationRevision) {
+        return cached.handle;
+      }
+      if (source_unchanged(tlut.data, texture::tlut_source_size(tlut.numEntries), cached.source)) {
+        cached.validationRevision = s_validationRevision;
+        s_validationRevisionUsed = true;
+        return cached.handle;
+      }
     }
     cache.dynamicPaletteTextures.clear();
     for (const u32 texObjId : cache.staticTextureUsers) {
@@ -378,12 +447,17 @@ gfx::TextureHandle get_tlut_texture(const GXTlutObj_& tlut) {
   }
 
   const size_t sourceBytes = texture::tlut_source_size(tlut.numEntries);
+  const uint64_t generation = source_generation(tlut.data, sourceBytes);
+  const XXH128_hash_t digest = XXH3_128bits(tlut.data, sourceBytes);
   const auto handle = gfx::new_static_texture_2d(tlut.numEntries, 1, 1, gfx::tlut_texture_format(tlut.format),
                                                  {static_cast<const u8*>(tlut.data), sourceBytes}, true, "Loaded TLUT");
   if (tlut.tlutObjId != 0) {
     auto& cache = s_tlutObjectCaches[tlut.tlutObjId];
     cache.tlutTexture.handle = handle;
     cache.tlutTexture.tlutDataVersion = tlut.tlutDataVersion;
+    cache.tlutTexture.validationRevision = s_validationRevision;
+    cache.tlutTexture.source = make_stamp(digest, generation);
+    s_validationRevisionUsed = true;
     cache.lastUsedFrame = s_frameCount;
   }
   return handle;
@@ -581,6 +655,16 @@ size_t tlut_source_size(u16 numEntries) noexcept { return static_cast<size_t>(nu
 
 void invalidate_bindings() noexcept { s_pendingInvalidations.fetch_add(1, std::memory_order_release); }
 
+void invalidate_sources() noexcept {
+  // Nothing was validated since the last bump, so every entry is already stale.
+  if (!s_validationRevisionUsed) {
+    return;
+  }
+  ++s_validationRevision;
+  s_validationRevisionUsed = false;
+  invalidate_bindings();
+}
+
 uint64_t current_bind_generation() noexcept {
   apply_pending_invalidations();
   return s_bindGeneration;
@@ -611,7 +695,8 @@ gfx::TextureHandle resolve_static_texture(const GXTexObj_& obj) {
   if (obj.texObjId != 0) {
     if (const auto it = s_textureObjectCaches.find(obj.texObjId); it != s_textureObjectCaches.end()) {
       auto& entry = it->second;
-      if (entry.handle && entry.texDataVersion == obj.texDataVersion && entry.tlutObjId == 0) {
+      if (entry.handle && entry.texDataVersion == obj.texDataVersion && entry.tlutObjId == 0 &&
+          validate_texture_entry(entry, obj, nullptr)) {
         entry.lastUsedFrame = s_frameCount;
         ++s_stats.objectHits;
         return entry.handle;
@@ -619,6 +704,8 @@ gfx::TextureHandle resolve_static_texture(const GXTexObj_& obj) {
     }
   }
 
+  const size_t textureBytes = texture_source_size(obj.format(), obj.width(), obj.height(), obj.mip_count());
+  const uint64_t textureGeneration = source_generation(obj.data, textureBytes);
   gfx::TextureHandle handle;
   uint64_t replacementId = 0;
   std::optional<TextureKeys> keys;
@@ -650,7 +737,9 @@ gfx::TextureHandle resolve_static_texture(const GXTexObj_& obj) {
     }
   }
   if (!obj.no_cache()) {
-    store_cached_texture(obj, handle, 0, 0, replacementId);
+    const SourceStamp textureStamp =
+        keys.has_value() ? make_stamp(keys->contentKey.textureHash, textureGeneration) : SourceStamp{};
+    store_cached_texture(obj, handle, 0, 0, replacementId, textureStamp);
   }
   return handle;
 }
@@ -662,7 +751,7 @@ gfx::TextureHandle resolve_static_palette_texture(const GXTexObj_& obj, const GX
     if (const auto it = s_textureObjectCaches.find(obj.texObjId); it != s_textureObjectCaches.end()) {
       auto& entry = it->second;
       if (entry.handle && entry.texDataVersion == obj.texDataVersion && entry.tlutObjId == tlut.tlutObjId &&
-          entry.tlutDataVersion == tlut.tlutDataVersion) {
+          entry.tlutDataVersion == tlut.tlutDataVersion && validate_texture_entry(entry, obj, &tlut)) {
         entry.lastUsedFrame = s_frameCount;
         if (auto tlutIt = s_tlutObjectCaches.find(tlut.tlutObjId); tlutIt != s_tlutObjectCaches.end()) {
           tlutIt->second.lastUsedFrame = s_frameCount;
@@ -673,6 +762,9 @@ gfx::TextureHandle resolve_static_palette_texture(const GXTexObj_& obj, const GX
     }
   }
 
+  const uint64_t textureGeneration = source_generation(
+      obj.data, texture_source_size(obj.format(), obj.width(), obj.height(), obj.mip_count()));
+  const uint64_t tlutGeneration = source_generation(tlut.data, tlut_source_size(tlut.numEntries));
   gfx::TextureHandle handle;
   uint64_t replacementId = 0;
   std::optional<TextureKeys> keys;
@@ -706,7 +798,13 @@ gfx::TextureHandle resolve_static_palette_texture(const GXTexObj_& obj, const GX
     }
   }
   if (!obj.no_cache() && !tlut.no_cache()) {
-    store_cached_texture(obj, handle, tlut.tlutObjId, tlut.tlutDataVersion, replacementId);
+    SourceStamp textureStamp;
+    SourceStamp tlutStamp;
+    if (keys.has_value()) {
+      textureStamp = make_stamp(keys->contentKey.textureHash, textureGeneration);
+      tlutStamp = make_stamp(keys->contentKey.tlutHash, tlutGeneration);
+    }
+    store_cached_texture(obj, handle, tlut.tlutObjId, tlut.tlutDataVersion, replacementId, textureStamp, tlutStamp);
   }
   return handle;
 }

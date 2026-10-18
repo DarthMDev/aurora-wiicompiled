@@ -897,6 +897,8 @@ void handle_aurora(ByteReader& reader) noexcept {
       g_gxState.drawsBlocking = blocking;
       g_gxState.dirty |= DirtyPipeline;
     }
+  } else if (subCmd == GX_AURORA_INVALIDATE_TEX_ALL) {
+    texture::invalidate_sources();
   } else if (subCmd == GX_AURORA_LOAD_COPY_SRC) {
     const s32 left = reader.read<s32>();
     const s32 top = reader.read<s32>();

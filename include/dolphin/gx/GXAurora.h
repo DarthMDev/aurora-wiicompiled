@@ -102,6 +102,9 @@ extern "C" {
 /** Sets whether subsequent draws wait for pipeline compilation. Followed by a u8 boolean. */
 #define GX_AURORA_SET_DRAWS_BLOCKING 0x0042
 
+/** Revalidates cached texture and TLUT sources against guest memory on next use. No payload. */
+#define GX_AURORA_INVALIDATE_TEX_ALL 0x0043
+
 /**
  * Asynchronous readback of EFB points.
  *
