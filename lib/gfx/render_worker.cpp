@@ -18,6 +18,7 @@ thread::Thread g_thread;
 std::atomic_bool g_running = false;
 std::atomic_size_t g_pendingItems = 0;
 std::thread::id g_workerThreadId;
+std::atomic<ProducerWaitCallback> g_producerWaitCallback = nullptr;
 
 void complete_sync(const std::shared_ptr<SyncState>& sync) {
   if (!sync) {
@@ -88,7 +89,7 @@ BoundedQueue::BoundedQueue(size_t capacity) : m_capacity(capacity) {}
 bool BoundedQueue::push(QueueItem item) {
   ZoneScoped;
   std::unique_lock lock{m_mutex};
-  m_notFull.wait(lock, [&] { return m_closed || m_items.size() < m_capacity; });
+  wait_servicing(m_notFull, lock, [&] { return m_closed || m_items.size() < m_capacity; });
   if (m_closed) {
     return false;
   }
@@ -139,7 +140,7 @@ FrameSlotPool::FrameSlotPool(size_t slotCount) : m_freeSlots(slotCount, true) {}
 
 size_t FrameSlotPool::acquire() {
   std::unique_lock lock{m_mutex};
-  m_cv.wait(lock, [&] {
+  wait_servicing(m_cv, lock, [&] {
     for (const bool free : m_freeSlots) {
       if (free) {
         return true;
@@ -263,11 +264,43 @@ void synchronize() {
       .sync = sync,
   });
   std::unique_lock lock{sync->mutex};
-  sync->cv.wait(lock, [&] { return sync->complete; });
+  wait_servicing(sync->cv, lock, [&] { return sync->complete; });
+}
+
+bool synchronize_for(std::chrono::microseconds timeout) {
+  if (is_worker_thread()) {
+    return true;
+  }
+
+  ZoneScoped;
+  auto sync = std::make_shared<SyncState>();
+  enqueue({
+      .type = ItemType::Sync,
+      .sync = sync,
+  });
+  std::unique_lock lock{sync->mutex};
+  return sync->cv.wait_for(lock, timeout, [&] { return sync->complete; });
 }
 
 bool is_worker_thread() noexcept { return g_workerThreadId == std::this_thread::get_id(); }
 
 bool is_idle() noexcept { return g_pendingItems.load(std::memory_order_acquire) == 0; }
+
+void set_producer_wait_callback(ProducerWaitCallback callback) noexcept {
+  g_producerWaitCallback.store(callback, std::memory_order_release);
+}
+
+ProducerWaitCallback producer_wait_callback() noexcept {
+  return g_producerWaitCallback.load(std::memory_order_acquire);
+}
+
+void service_producer_wait() noexcept {
+  if (is_worker_thread()) {
+    return;
+  }
+  if (const auto callback = producer_wait_callback()) {
+    callback();
+  }
+}
 
 } // namespace aurora::gfx::render_worker

@@ -5,6 +5,9 @@
 
 #ifdef AURORA_ENABLE_GX
 #include "gfx/resources.hpp"
+#include "gfx/presentation.hpp"
+#include <dolphin/gx.h>
+#include <aurora/texture.hpp>
 #include "gfx/frame.hpp"
 #include "gfx/depth_peek.hpp"
 #include "gfx/recording.hpp"
@@ -25,6 +28,7 @@
 
 #include "gamepad.hpp"
 #include "internal.hpp"
+#include "io.hpp"
 #include "thread.hpp"
 #include "window.hpp"
 
@@ -100,6 +104,33 @@ constexpr std::array<AuroraBackend, 0> PreferredBackendOrder{};
 
 bool g_initialFrame = false;
 
+constexpr const char* backend_name(AuroraBackend backend) noexcept {
+  switch (backend) {
+  case BACKEND_AUTO:
+    return "Auto";
+  case BACKEND_D3D11:
+    return "D3D11";
+  case BACKEND_D3D12:
+    return "D3D12";
+  case BACKEND_METAL:
+    return "Metal";
+  case BACKEND_VULKAN:
+    return "Vulkan";
+  case BACKEND_OPENGL:
+    return "OpenGL";
+  case BACKEND_OPENGLES:
+    return "OpenGLES";
+  case BACKEND_WEBGPU:
+    return "WebGPU";
+  case BACKEND_NULL:
+    return "Null";
+  }
+  return "Unknown";
+}
+#ifdef AURORA_ENABLE_GX
+texture::ReplacementGroup g_textureReplacements;
+#endif
+
 AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexcept {
   g_config = config;
   Log.info("Aurora initializing");
@@ -149,14 +180,32 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
 
 #ifdef AURORA_ENABLE_GX
   /* Attempt to create a window using the calling application's desired backend */
-  AuroraBackend selectedBackend = config.desiredBackend;
+  const AuroraBackend requestedBackend = config.desiredBackend;
+  AuroraBackend selectedBackend = requestedBackend;
   bool windowCreated = false;
+  std::string firstGraphicsError;
+  const auto rememberGraphicsError = [&] {
+    if (firstGraphicsError.empty() && *SDL_GetError() != '\0') {
+      firstGraphicsError = SDL_GetError();
+    }
+  };
 
-  if (selectedBackend != BACKEND_AUTO && window::create_window(selectedBackend)) {
-    if (webgpu::initialize(selectedBackend, config.allowCpuAdapter)) {
-      windowCreated = true;
+  if (selectedBackend != BACKEND_AUTO) {
+    Log.info("Requested graphics backend: {}", backend_name(selectedBackend));
+    if (window::create_window(selectedBackend)) {
+      if (webgpu::initialize(selectedBackend, config.allowCpuAdapter)) {
+        windowCreated = true;
+      } else {
+        rememberGraphicsError();
+        window::destroy_window();
+      }
     } else {
-      window::destroy_window();
+      rememberGraphicsError();
+    }
+    if (!windowCreated) {
+      // An unavailable requested backend falls back to the automatic search instead of aborting.
+      Log.error("Requested graphics backend {} is unavailable; falling back to automatic selection",
+                backend_name(requestedBackend));
     }
   }
 
@@ -165,6 +214,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
       selectedBackend = backendType;
 
       if (!window::create_window(selectedBackend)) {
+        rememberGraphicsError();
         continue;
       }
 
@@ -172,12 +222,27 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
         windowCreated = true;
         break;
       } else {
+        rememberGraphicsError();
         window::destroy_window();
       }
     }
   }
 
-  AURORA_ASSERT(windowCreated, "Error creating window: {}", SDL_GetError());
+  if (!windowCreated) {
+    if (firstGraphicsError.empty()) {
+      firstGraphicsError = "No supported graphics backend is available";
+    }
+    SDL_SetError("%s", firstGraphicsError.c_str());
+    Log.error("Graphics initialization failed: {}", firstGraphicsError);
+    return {
+        .initializationStatus = AURORA_INITIALIZATION_GRAPHICS_UNAVAILABLE,
+        .initializationError = SDL_GetError(),
+    };
+  }
+  if (requestedBackend != BACKEND_AUTO && selectedBackend != requestedBackend) {
+    Log.error("Graphics backend fallback in effect: requested {}, running on {}",
+              backend_name(requestedBackend), backend_name(selectedBackend));
+  }
 
   // Initialize SDL_Renderer for ImGui when we can't use a Dawn backend
   if (webgpu::g_backendType == wgpu::BackendType::Null) {
@@ -208,6 +273,11 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   }
 
   imgui::initialize();
+
+  if (g_config.allowTextureReplacements) {
+    g_textureReplacements =
+        texture::load_replacement_directory(io::fs_path_from_string(g_config.userPath) / "texture_replacements");
+  }
 #endif
 
 #ifdef AURORA_ENABLE_RMLUI
@@ -454,6 +524,7 @@ void end_frame() noexcept {
 
       if (status) {
         gfx::after_present();
+        gfx::presentation::record_present(false);
       } else {
         Log.warn("Surface present failed");
         webgpu::release_surface();
@@ -549,6 +620,17 @@ const AuroraBackend* aurora_get_available_backends(size_t* count) {
 void aurora_set_log_level(AuroraLogLevel level) { aurora::g_config.logLevel = level; }
 
 void aurora_set_pause_on_focus_lost(bool value) { aurora::g_config.pauseOnFocusLost = value; }
+
+void aurora_set_display_mode(AuroraDisplayMode mode) { aurora::window::set_display_mode(mode); }
+
+AuroraDisplayMode aurora_get_display_mode() { return aurora::window::get_display_mode(); }
+
+#if !defined(__APPLE__)
+void aurora_set_metalfx_spatial(bool) {}
+bool aurora_get_metalfx_spatial() { return false; }
+bool aurora_is_metalfx_spatial_supported() { return false; }
+AuroraMetalFXStatus aurora_get_metalfx_status() { return AURORA_METALFX_UNSUPPORTED; }
+#endif
 
 void aurora_set_background_input(bool value) {
   aurora::g_config.allowJoystickBackgroundEvents = value;

@@ -159,7 +159,11 @@ void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
   GX_WRITE_U8(mipmap != GX_FALSE);
 }
 
-// TODO GXSetDispCopyFrame2Field
+void GXSetDispCopyFrame2Field(u32 mode) {
+  SET_REG_FIELD(0, __gx->cpDisp, 2, 12, mode);
+  SET_REG_FIELD(0, __gx->cpTex, 2, 12, 0);
+}
+
 void GXSetCopyClamp(GXFBClamp clamp) {
 	SET_REG_FIELD(0, __gx->cpTex, 1, 0, (clamp & GX_CLAMP_TOP) != 0);
 	SET_REG_FIELD(0, __gx->cpTex, 1, 1, (clamp & GX_CLAMP_BOTTOM) != 0);
@@ -262,6 +266,33 @@ f32 GXGetYScaleFactor(u16 efbHeight, u16 xfbHeight) {
 
 	return result;
 }
-// TODO GXClearBoundingBox
-// TODO GXReadBoundingBox
+namespace {
+// The bounding box is never computed from draws, so reads return the last cleared box.
+u16 sBoundingBox[4] = {1023, 0, 1023, 0};
+} // namespace
+
+void GXClearBoundingBox(void) {
+  GX_WRITE_RAS_REG(0x550003FFu);
+  GX_WRITE_RAS_REG(0x560003FFu);
+  __gx->bpSent = 0;
+  sBoundingBox[0] = 1023;
+  sBoundingBox[1] = 0;
+  sBoundingBox[2] = 1023;
+  sBoundingBox[3] = 0;
+}
+
+void GXReadBoundingBox(u16* left, u16* right, u16* top, u16* bottom) {
+  if (left != nullptr) {
+    *left = sBoundingBox[0];
+  }
+  if (right != nullptr) {
+    *right = sBoundingBox[1];
+  }
+  if (top != nullptr) {
+    *top = sBoundingBox[2];
+  }
+  if (bottom != nullptr) {
+    *bottom = sBoundingBox[3];
+  }
+}
 }

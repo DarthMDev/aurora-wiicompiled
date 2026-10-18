@@ -29,12 +29,34 @@ void GXPushDebugGroup(const char* label) {
 
 void GXPopDebugGroup() { GX_WRITE_AURORA(GX_AURORA_DEBUG_GROUP_POP); }
 
+void GXApplyBPReg(u8 reg, u32 value) {
+  switch (reg) {
+  case 0x45: // draw done
+  case 0x47: // token
+  case 0x48: // token interrupt
+  case 0x52: // EFB copy trigger: copies go through GXCopyTex/GXCopyDisp
+    return;
+  default:
+    GX_WRITE_RAS_REG((static_cast<u32>(reg) << 24) | (value & 0xFFFFFF));
+  }
+}
+
 void GXInsertDebugMarker(const char* label) {
   GX_WRITE_AURORA(GX_AURORA_DEBUG_MARKER_INSERT);
   GXWriteString(label);
 }
 
 void AuroraSetViewportPolicy(AuroraViewportPolicy policy) { aurora::gx::set_viewport_policy(policy); }
+
+void AuroraGetSurfaceSize(u32* width, u32* height) {
+  const auto windowSize = aurora::window::get_window_size();
+  if (width != nullptr) {
+    *width = windowSize.native_fb_width;
+  }
+  if (height != nullptr) {
+    *height = windowSize.native_fb_height;
+  }
+}
 
 void AuroraGetRenderSize(u32* width, u32* height) {
   const auto windowSize = aurora::window::get_window_size();

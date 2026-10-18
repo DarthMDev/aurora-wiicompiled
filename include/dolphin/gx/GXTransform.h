@@ -29,6 +29,7 @@ void GXSetViewport(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz);
 void GXSetCurrentMtx(u32 id);
 void GXSetViewportJitter(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz, u32 field);
 void GXSetScissorBoxOffset(s32 x_off, s32 y_off);
+void GXSetZScaleOffset(f32 scale, f32 offset);
 void GXSetClipMode(GXClipMode mode);
 
 #ifdef __cplusplus

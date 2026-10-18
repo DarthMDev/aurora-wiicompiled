@@ -215,8 +215,11 @@ void wait_for_gpu_progress(std::chrono::nanoseconds sleepDuration) {
     enqueue_process_events();
   }
 
-  std::unique_lock lock{g_progressMutex};
-  g_progressChanged.wait_for(lock, sleepDuration, [&] { return generation != g_progressGeneration; });
+  {
+    std::unique_lock lock{g_progressMutex};
+    g_progressChanged.wait_for(lock, sleepDuration, [&] { return generation != g_progressGeneration; });
+  }
+  render_worker::service_producer_wait();
 }
 
 void pace_frame_start() {

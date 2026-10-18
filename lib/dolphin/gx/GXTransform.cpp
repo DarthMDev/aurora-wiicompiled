@@ -120,6 +120,12 @@ void GXLoadTexMtxImm(const void* mtx_, u32 id, GXTexMtxType type) {
   }
 }
 
+namespace {
+// GXSetZScaleOffset state; the defaults reproduce the plain 24-bit depth mapping.
+f32 sZScale = 1.6777215e7f;
+f32 sZOffset = 0.0f;
+} // namespace
+
 void GXSetViewport(float left, float top, float width, float height, float nearZ, float farZ) {
   GXSetViewportJitter(left, top, width, height, nearZ, farZ, 1);
 }
@@ -142,10 +148,10 @@ void GXSetViewportJitter(float left, float top, float width, float height, float
   sy = -height / 2.0f;
   ox = 340.0f + (left + width / 2.0f);
   oy = 340.0f + (top + height / 2.0f);
-  zmin = 1.6777215e7f * nearZ;
-  zmax = 1.6777215e7f * farZ;
+  zmin = sZScale * nearZ;
+  zmax = sZScale * farZ;
   sz = zmax - zmin;
-  oz = zmax;
+  oz = zmax + sZOffset;
 
   __gx->vpLeft = left;
   __gx->vpTop = top;
@@ -202,5 +208,18 @@ void GXLoadNrmMtxIndx3x3(u16 mtxIndx, u32 id) {
 }
 
 // TODO GXLoadTexMtxIndx
-// TODO GXSetZScaleOffset
+void GXSetZScaleOffset(f32 scale, f32 offset) {
+  sZOffset = offset * 16777215.0f;
+  sZScale = scale * 16777215.0f + 1.0f;
+  const f32 zmin = __gx->vpNearz * sZScale;
+  const f32 zmax = __gx->vpFarz * sZScale;
+
+  GX_WRITE_U8(0x10);
+  GX_WRITE_U32(0x101C);
+  GX_WRITE_XF_REG_F(28, zmax - zmin);
+  GX_WRITE_U8(0x10);
+  GX_WRITE_U32(0x101F);
+  GX_WRITE_XF_REG_F(31, zmax + sZOffset);
+  __gx->bpSent = 0;
+}
 }

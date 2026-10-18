@@ -228,6 +228,8 @@ void update() noexcept {
     const auto policy = static_cast<AuroraViewportPolicy>(pending);
     g_gxState.viewportPolicy = policy;
     window::set_frame_buffer_aspect_fit(policy == AURORA_VIEWPORT_FIT);
+    window::set_force_aspect_16_9(policy == AURORA_VIEWPORT_16_9);
+    window::set_present_surface_fill(policy == AURORA_VIEWPORT_STRETCH);
   }
 }
 

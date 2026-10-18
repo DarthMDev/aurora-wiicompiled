@@ -157,6 +157,7 @@ typedef enum _AuroraViewportPolicy {
   AURORA_VIEWPORT_FIT = 0,     // Preserve logical aspect in the content framebuffer
   AURORA_VIEWPORT_STRETCH = 1, // Match content framebuffer aspect to the native surface
   AURORA_VIEWPORT_NATIVE = 2,  // Use active framebuffer pixels directly
+  AURORA_VIEWPORT_16_9 = 3,    // Fixed 16:9 content framebuffer, letterboxed to the surface
 } AuroraViewportPolicy;
 
 /**
@@ -169,6 +170,16 @@ void AuroraSetViewportPolicy(AuroraViewportPolicy policy);
  * Retrieves the current content framebuffer size.
  */
 void AuroraGetRenderSize(u32* width, u32* height);
+
+/**
+ * Returns the native presentation surface size, independent of the GX framebuffer sizing policy.
+ */
+void AuroraGetSurfaceSize(u32* width, u32* height);
+
+/**
+ * Applies a raw BP register write in command-stream order.
+ */
+void GXApplyBPReg(u8 reg, u32 value);
 
 /**
  * Flush pending GX state and wait for FIFO processing without signaling a draw-done callback.

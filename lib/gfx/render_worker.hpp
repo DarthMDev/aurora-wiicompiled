@@ -81,8 +81,31 @@ void enqueue_encode_pass(uint64_t frameId, uint32_t passIndex, WorkCallback work
 void enqueue_end_frame(uint64_t frameId, WorkCallback work);
 void enqueue_work(WorkCallback work);
 void synchronize();
+// Like synchronize(), but gives up after `timeout`. Returns whether the worker caught up.
+bool synchronize_for(std::chrono::microseconds timeout);
 
 bool is_worker_thread() noexcept;
 bool is_idle() noexcept;
+
+using ProducerWaitCallback = void (*)();
+void set_producer_wait_callback(ProducerWaitCallback callback) noexcept;
+ProducerWaitCallback producer_wait_callback() noexcept;
+
+// Runs the producer wait callback while the calling thread blocks on the renderer.
+void service_producer_wait() noexcept;
+
+// cv.wait(lock, pred), but the producer wait callback keeps running every millisecond.
+template <typename Pred>
+void wait_servicing(std::condition_variable& cv, std::unique_lock<std::mutex>& lock, Pred pred) {
+  if (producer_wait_callback() == nullptr || is_worker_thread()) {
+    cv.wait(lock, pred);
+    return;
+  }
+  while (!cv.wait_for(lock, std::chrono::milliseconds{1}, pred)) {
+    lock.unlock();
+    service_producer_wait();
+    lock.lock();
+  }
+}
 
 } // namespace aurora::gfx::render_worker

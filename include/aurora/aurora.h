@@ -37,6 +37,12 @@ typedef enum {
   LOG_FATAL,
 } AuroraLogLevel;
 
+typedef enum {
+  AURORA_DISPLAY_MODE_WINDOWED,
+  AURORA_DISPLAY_MODE_BORDERLESS,
+  AURORA_DISPLAY_MODE_EXCLUSIVE,
+} AuroraDisplayMode;
+
 typedef struct {
   int32_t x;
   int32_t y;
@@ -93,7 +99,12 @@ typedef struct {
   bool allowJoystickBackgroundEvents;
   bool pauseOnFocusLost;
   bool allowTextureDumps;
+  bool allowTextureReplacements;
   bool allowCpuAdapter;
+  bool disableCopyFilter;
+  // When false, Aurora centers the first window. When true, windowPosX/Y are restored verbatim,
+  // including negative coordinates on monitors left of or above the primary display.
+  bool hasWindowPosition;
   int32_t windowPosX;
   int32_t windowPosY;
   uint32_t windowWidth;
@@ -119,12 +130,20 @@ typedef struct {
   uint32_t mem2Size;
 } AuroraConfig;
 
+typedef enum {
+  AURORA_INITIALIZATION_SUCCESS = 0,
+  AURORA_INITIALIZATION_GRAPHICS_UNAVAILABLE = 1,
+} AuroraInitializationStatus;
+
 typedef struct {
   AuroraBackend backend;
   const char* userPath;
   const char* cachePath;
   SDL_Window* window;
   AuroraWindowSize windowSize;
+  AuroraInitializationStatus initializationStatus;
+  // On failure, owned by SDL on the calling thread. Copy before another SDL call.
+  const char* initializationError;
 } AuroraInfo;
 
 AuroraInfo aurora_initialize(int argc, char* argv[], const AuroraConfig* config);
@@ -133,9 +152,39 @@ const AuroraEvent* aurora_update();
 bool aurora_begin_frame();
 void aurora_end_frame();
 
+typedef void (*AuroraFrameWorkerWaitCallback)();
+// Called from the producer thread at bounded intervals while Aurora blocks on rendering.
+// The callback must not enter Aurora.
+void aurora_set_frame_worker_wait_callback(AuroraFrameWorkerWaitCallback callback);
+// Waits until every frame handed to the renderer has been encoded.
+void aurora_wait_for_frame_worker();
+bool aurora_wait_for_frame_worker_for(uint32_t timeoutMicros);
+// Absolute schedule for the next frame, on steady_clock: baseNanos anchors the group and
+// intervalNanos is the period, so slot k of N+1 presents at base + k*interval/(N+1). Zeros clear it.
+void aurora_set_present_schedule(uint64_t baseNanos, uint64_t intervalNanos);
+// Reports whether the frame about to be ended met its display boundary. Interpolation sizes its
+// slot group from this, backing off after misses. Only paced presents may report.
+void aurora_report_producer_paced(bool paced);
+
 void aurora_set_log_level(AuroraLogLevel level);
 void aurora_set_pause_on_focus_lost(bool value);
 void aurora_set_background_input(bool value);
+void aurora_set_display_mode(AuroraDisplayMode mode);
+AuroraDisplayMode aurora_get_display_mode();
+
+typedef enum {
+  AURORA_METALFX_DISABLED,
+  AURORA_METALFX_UNSUPPORTED,
+  AURORA_METALFX_NOT_UPSCALING,
+  AURORA_METALFX_ACTIVE,
+  AURORA_METALFX_ERROR,
+} AuroraMetalFXStatus;
+
+// MetalFX only applies when both source dimensions are smaller than the aspect-fitted output.
+void aurora_set_metalfx_spatial(bool enabled);
+bool aurora_get_metalfx_spatial();
+bool aurora_is_metalfx_spatial_supported();
+AuroraMetalFXStatus aurora_get_metalfx_status();
 void aurora_set_resampler(AuroraSampler sampler);
 /** Sets the clock timescale. Default 1.0f. 0.0f is paused. Range 0.0f-16.0f. */
 void aurora_set_timescale(float scale);
