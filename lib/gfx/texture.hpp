@@ -1,4 +1,5 @@
 #pragma once
+#include <bit>
 #include <dolphin/gx.h>
 
 #include <utility>
@@ -91,13 +92,21 @@ struct GXTexObj_ {
   GXTexWrapMode wrap_t() const noexcept { return static_cast<GXTexWrapMode>(get_bits(mode0, 2, 2)); }
   GXTexFilter min_filter() const noexcept {
     constexpr GXTexFilter kHwToGxFilter[8] = {
-        GX_NEAR, GX_NEAR_MIP_NEAR, GX_LIN_MIP_NEAR, GX_NEAR, GX_LINEAR, GX_NEAR_MIP_LIN, GX_LIN_MIP_LIN, GX_NEAR,
+        GX_NEAR, GX_NEAR_MIP_NEAR, GX_NEAR_MIP_LIN, GX_NEAR, GX_LINEAR, GX_LIN_MIP_NEAR, GX_LIN_MIP_LIN, GX_NEAR,
     };
     return kHwToGxFilter[get_bits(mode0, 3, 5)];
   }
   GXTexFilter mag_filter() const noexcept { return get_bits(mode0, 1, 4) != 0 ? GX_LINEAR : GX_NEAR; }
   GXBool has_mips() const noexcept { return (flags & 1u) != 0 ? GX_TRUE : GX_FALSE; }
-  u32 mip_count() const noexcept { return has_mips() ? std::max<u32>(static_cast<u32>(max_lod()) + 1, 1u) : 1; }
+  // Bad guest max LOD values must not request more levels than the texture can have.
+  u32 mip_count() const noexcept {
+    if (!has_mips()) {
+      return 1;
+    }
+    const u32 requested = std::max<u32>(static_cast<u32>(max_lod()) + 1, 1u);
+    const u32 largest = std::max<u32>(std::max<u32>(width(), height()), 1u);
+    return std::min(requested, static_cast<u32>(std::bit_width(largest)));
+  }
   GXBool do_edge_lod() const noexcept { return get_bits(mode0, 1, 8) == 0 ? GX_TRUE : GX_FALSE; }
   float lod_bias() const noexcept { return static_cast<float>(static_cast<int8_t>(get_bits(mode0, 8, 9))) / 32.0f; }
   GXAnisotropy max_aniso() const noexcept { return static_cast<GXAnisotropy>(get_bits(mode0, 2, 19)); }

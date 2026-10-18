@@ -184,7 +184,9 @@ std::string color_arg_reg(GXTevColorArg arg, size_t stageIdx, const ShaderConfig
     return "vec3f(0.5)";
   case GX_CC_KONST: {
     switch (stage.kcSel) {
-      DEFAULT_FATAL("invalid kcSel {}", underlying(stage.kcSel));
+    // Unsourced selectors (0x08-0x0B) read as zero on hardware.
+    default:
+      return "vec3f(0.0)";
     case GX_TEV_KCSEL_8_8:
       return "vec3f(1.0)";
     case GX_TEV_KCSEL_7_8:
@@ -294,7 +296,9 @@ std::string alpha_arg_reg(GXTevAlphaArg arg, size_t stageIdx, const ShaderConfig
 
   case GX_CA_KONST: {
     switch (stage.kaSel) {
-      DEFAULT_FATAL("invalid kaSel {}", underlying(stage.kaSel));
+    // Unsourced selectors (0x08-0x0F) read as zero on hardware.
+    default:
+      return "0.0";
     case GX_TEV_KASEL_8_8:
       return "1.0";
     case GX_TEV_KASEL_7_8:
@@ -557,7 +561,8 @@ AlphaCompareExpr alpha_compare(GXCompare comp, u8 ref) {
   const auto iref = static_cast<u32>(ref);
 
   switch (comp) {
-    DEFAULT_FATAL("invalid alpha comp {}", underlying(comp));
+  default:
+    return alpha_compare_const(true);
   case GX_NEVER:
     return alpha_compare_const(false);
   case GX_LESS:
@@ -1786,7 +1791,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
     AlphaCompareExpr pass;
 
     switch (config.alphaCompare.op) {
-      DEFAULT_FATAL("invalid alpha compare op {}", underlying(config.alphaCompare.op));
+    default:
     case GX_AOP_AND:
       pass = alpha_compare_and(comp0, comp1);
       break;

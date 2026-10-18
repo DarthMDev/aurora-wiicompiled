@@ -42,11 +42,15 @@ void apply_viewport(const wgpu::RenderPassEncoder& pass, const Viewport& vp) {
 }
 
 void apply_scissor(const wgpu::RenderPassEncoder& pass, const ClipRect& sc, const wgpu::Extent3D& size) {
-  const auto x = std::clamp(static_cast<uint32_t>(sc.x), 0u, size.width);
-  const auto y = std::clamp(static_cast<uint32_t>(sc.y), 0u, size.height);
-  const auto w = std::clamp(static_cast<uint32_t>(sc.width), 0u, size.width - x);
-  const auto h = std::clamp(static_cast<uint32_t>(sc.height), 0u, size.height - y);
-  pass.SetScissorRect(x, y, w, h);
+  // Clamp in signed space: a negative origin must shrink the rectangle, not wrap around.
+  const int64_t width = size.width;
+  const int64_t height = size.height;
+  const int64_t left = std::clamp<int64_t>(sc.x, 0, width);
+  const int64_t top = std::clamp<int64_t>(sc.y, 0, height);
+  const int64_t right = std::clamp<int64_t>(static_cast<int64_t>(sc.x) + sc.width, left, width);
+  const int64_t bottom = std::clamp<int64_t>(static_cast<int64_t>(sc.y) + sc.height, top, height);
+  pass.SetScissorRect(static_cast<uint32_t>(left), static_cast<uint32_t>(top), static_cast<uint32_t>(right - left),
+                      static_cast<uint32_t>(bottom - top));
 }
 
 DrawContext make_draw_context(const RenderPass& passInfo) {
