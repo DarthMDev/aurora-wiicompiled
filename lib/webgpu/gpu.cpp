@@ -14,6 +14,7 @@
 #include <aurora/aurora.h>
 #include <aurora/webgpu.hpp>
 #include <aurora/gfx.h>
+#include <aurora/render_size_limits.hpp>
 #include <magic_enum.hpp>
 #include <webgpu/webgpu_cpp.h>
 
@@ -769,7 +770,31 @@ static wgpu::BackendType to_wgpu_backend(AuroraBackend backend) {
   }
 }
 
-static void release_surface_locked() noexcept { g_surface = {}; }
+static uint32_t g_maxTextureDimension2D = 0;
+
+static bool release_surface_locked() noexcept {
+  if (!g_surface) {
+    return false;
+  }
+  g_surface.Unconfigure();
+  g_surface = {};
+  return true;
+}
+
+// A retired swapchain is freed only after a later submission completes and the device ticks.
+static void wait_surface_retired() noexcept {
+  if (!g_instance || !g_device || !g_queue) {
+    return;
+  }
+  const auto commands = g_device.CreateCommandEncoder().Finish();
+  g_queue.Submit(1, &commands);
+  const auto future =
+      g_queue.OnSubmittedWorkDone(wgpu::CallbackMode::WaitAnyOnly, [](wgpu::QueueWorkDoneStatus, wgpu::StringView) {});
+  if (const auto status = g_instance.WaitAny(future, 1000000000); status != wgpu::WaitStatus::Success) {
+    Log.warn("Timed out waiting for queue idle on surface release: {}", magic_enum::enum_name(status));
+  }
+  g_device.Tick();
+}
 
 static bool create_surface() {
   SDL_Window* window = window::get_sdl_window();
@@ -777,8 +802,15 @@ static bool create_surface() {
     Log.error("Failed to create surface: no window");
     return false;
   }
+  bool released = false;
+  {
+    window::SurfaceLock surfaceLock;
+    released = release_surface_locked();
+  }
+  if (released) {
+    wait_surface_retired();
+  }
   window::SurfaceLock surfaceLock;
-  release_surface_locked();
   g_surface = create_window_surface(g_instance, window, "Surface");
   if (!g_surface) {
     Log.error("Failed to create surface");
@@ -914,6 +946,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
         .maxStorageBuffersInVertexStage = 2,
         .maxStorageBuffersInFragmentStage = 2,
     }};
+    g_maxTextureDimension2D = supportedLimits.maxTextureDimension2D;
     const wgpu::Limits requiredLimits{
         .nextInChain = &compatibilityModeLimits,
         // Use "best" supported limits
@@ -1141,9 +1174,13 @@ void shutdown() {
 
 void release_surface() noexcept {
   gfx::gpu_synchronize();
+  bool released = false;
   {
     window::SurfaceLock surfaceLock;
-    release_surface_locked();
+    released = release_surface_locked();
+  }
+  if (released) {
+    wait_surface_retired();
   }
 }
 
@@ -1151,6 +1188,13 @@ static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t 
                                       bool force) {
   if (!g_surface || !g_device || width == 0 || height == 0 || nativeHeight == 0 || nativeWidth == 0) {
     return;
+  }
+  const auto budgeted = render_size_limits::fit_framebuffer_to_budget(width, height, g_maxTextureDimension2D);
+  if (budgeted.width != width || budgeted.height != height) {
+    Log.warn("Render target {}x{} exceeds the framebuffer budget; clamping to {}x{}", width, height, budgeted.width,
+             budgeted.height);
+    width = budgeted.width;
+    height = budgeted.height;
   }
   const bool sizeChanged = g_graphicsConfig.surfaceConfiguration.width != nativeWidth ||
                            g_graphicsConfig.surfaceConfiguration.height != nativeHeight ||
@@ -1181,9 +1225,13 @@ bool refresh_surface(bool recreate) {
     return false;
   }
   if (!window::is_presentable()) {
+    bool released = false;
     {
       window::SurfaceLock surfaceLock;
-      release_surface_locked();
+      released = release_surface_locked();
+    }
+    if (released) {
+      wait_surface_retired();
     }
     return false;
   }
