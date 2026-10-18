@@ -400,12 +400,13 @@ struct GXState {
   f32 clamp = 0.0f;
 
   // View state
-  s32 scissorOffsetX = 342;
-  s32 scissorOffsetY = 342;
   AuroraViewportPolicy viewportPolicy = AURORA_VIEWPORT_FIT;
   gfx::Viewport logicalViewport{0.f, 0.f, 640.f, 480.f, 0.f, 1.f};
   gfx::Viewport renderViewport{0.f, 0.f, 640.f, 480.f, 0.f, 1.f};
   gfx::ClipRect logicalScissor{0, 0, 640, 480};
+  // GXSetScissorBoxOffset, in logical EFB pixels.
+  s32 scissorOffsetX = 0;
+  s32 scissorOffsetY = 0;
   gfx::ClipRect renderScissor{0, 0, 640, 480};
 
   // EFB copy state
@@ -457,6 +458,9 @@ void evict_tlut_object(u32 tlutObjId) noexcept;
 Vec2<uint32_t> logical_fb_size() noexcept;
 gfx::Viewport map_logical_viewport(const gfx::Viewport& logicalViewport) noexcept;
 gfx::ClipRect map_logical_scissor(const gfx::ClipRect& logicalScissor) noexcept;
+// Render-target viewport and scissor for the current logical state, including the scissor box offset.
+gfx::Viewport mapped_render_viewport() noexcept;
+gfx::ClipRect mapped_render_scissor() noexcept;
 void set_logical_viewport(const gfx::Viewport& viewport) noexcept;
 void set_render_viewport(const gfx::Viewport& viewport) noexcept;
 void set_logical_scissor(const gfx::ClipRect& scissor) noexcept;

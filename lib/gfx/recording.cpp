@@ -593,8 +593,8 @@ void begin_recording(FramePacket& packet, size_t frameSlot) {
   pass.colorAttachments[SceneColorAttachmentIndex].clearValue = gx::g_gxState.clearColor;
   pass.clearDepthValue = gx::clear_depth_value();
   g_recorder.currentRenderPass = 0;
-  g_recorder.cachedViewport = gx::map_logical_viewport(gx::g_gxState.logicalViewport);
-  g_recorder.cachedScissor = gx::map_logical_scissor(gx::g_gxState.logicalScissor);
+  g_recorder.cachedViewport = gx::mapped_render_viewport();
+  g_recorder.cachedScissor = gx::mapped_render_scissor();
   push_command(CommandType::SetViewport, Command::Data{.setViewport = g_recorder.cachedViewport});
   push_command(CommandType::SetScissor, Command::Data{.setScissor = g_recorder.cachedScissor});
 }

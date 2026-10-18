@@ -15,11 +15,14 @@
 #include <absl/container/flat_hash_map.h>
 #include <tracy/Tracy.hpp>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cfloat>
 #include <cmath>
 #include <mutex>
+#include <optional>
 #include <utility>
 
 static aurora::Module Log("aurora::gx");
@@ -320,13 +323,119 @@ gfx::ClipRect map_logical_scissor(const gfx::ClipRect& logicalScissor) noexcept 
   };
 }
 
+namespace {
+struct ScissorRange {
+  s32 offset = 0;
+  s32 start = 0;
+  s32 end = 0;
+};
+
+struct OffsetScissor {
+  gfx::ClipRect rect{};
+  s32 xOff = 0;
+  s32 yOff = 0;
+};
+
+// The offset wraps every 1024 EFB pixels, so try each wrap and keep the ones that land on the EFB.
+std::array<ScissorRange, 9> scissor_ranges(s32 start, s32 end, s32 offset, s32 efbDim, u32& count) noexcept {
+  std::array<ScissorRange, 9> ranges{};
+  count = 0;
+  for (s32 extraOff = -4096; extraOff <= 4096; extraOff += 1024) {
+    const s32 newOff = offset + extraOff;
+    const s32 newStart = std::clamp(start - newOff, 0, efbDim);
+    const s32 newEnd = std::clamp(end - newOff + 1, 0, efbDim);
+    if (newStart < newEnd && count < ranges.size()) {
+      ranges[count++] = {.offset = newOff, .start = newStart, .end = newEnd};
+    }
+  }
+  return ranges;
+}
+
+int viewport_overlap(const OffsetScissor& rect, const gfx::Viewport& viewport) noexcept {
+  const float vpLeft = std::min(viewport.left, viewport.left + viewport.width);
+  const float vpRight = std::max(viewport.left, viewport.left + viewport.width);
+  const float vpTop = std::min(viewport.top, viewport.top + viewport.height);
+  const float vpBottom = std::max(viewport.top, viewport.top + viewport.height);
+  const float left = std::clamp(static_cast<float>(rect.rect.x + rect.xOff), vpLeft, vpRight);
+  const float right = std::clamp(static_cast<float>(rect.rect.x + rect.rect.width + rect.xOff), vpLeft, vpRight);
+  const float top = std::clamp(static_cast<float>(rect.rect.y + rect.yOff), vpTop, vpBottom);
+  const float bottom = std::clamp(static_cast<float>(rect.rect.y + rect.rect.height + rect.yOff), vpTop, vpBottom);
+  return static_cast<int>(std::max(right - left, 0.f) * std::max(bottom - top, 0.f));
+}
+
+// Dolphin's choice among the wrapped candidates: the one covering most of the viewport.
+OffsetScissor offset_scissor() noexcept {
+  const auto& scissor = g_gxState.logicalScissor;
+  constexpr OffsetScissor empty{.rect = {1000, 1000, 1, 1}};
+  if (scissor.width <= 0 || scissor.height <= 0) {
+    return empty;
+  }
+  const auto [fbWidth, fbHeight] = logical_fb_size();
+  u32 xCount = 0;
+  u32 yCount = 0;
+  const auto xRanges = scissor_ranges(scissor.x, scissor.x + scissor.width - 1, g_gxState.scissorOffsetX,
+                                      static_cast<s32>(fbWidth), xCount);
+  const auto yRanges = scissor_ranges(scissor.y, scissor.y + scissor.height - 1, g_gxState.scissorOffsetY,
+                                      static_cast<s32>(fbHeight), yCount);
+  if (xCount == 0 || yCount == 0) {
+    return empty;
+  }
+  std::optional<OffsetScissor> best;
+  for (u32 x = 0; x < xCount; ++x) {
+    for (u32 y = 0; y < yCount; ++y) {
+      const OffsetScissor candidate{
+          .rect = {xRanges[x].start, yRanges[y].start, xRanges[x].end - xRanges[x].start,
+                   yRanges[y].end - yRanges[y].start},
+          .xOff = xRanges[x].offset,
+          .yOff = yRanges[y].offset,
+      };
+      if (!best) {
+        best = candidate;
+        continue;
+      }
+      const int candidateArea = viewport_overlap(candidate, g_gxState.logicalViewport);
+      const int bestArea = viewport_overlap(*best, g_gxState.logicalViewport);
+      if (candidateArea > bestArea ||
+          (candidateArea == bestArea &&
+           candidate.rect.width * candidate.rect.height > best->rect.width * best->rect.height)) {
+        best = candidate;
+      }
+    }
+  }
+  return *best;
+}
+
+bool has_scissor_offset() noexcept { return g_gxState.scissorOffsetX != 0 || g_gxState.scissorOffsetY != 0; }
+} // namespace
+
+gfx::Viewport mapped_render_viewport() noexcept {
+  if (!has_scissor_offset()) {
+    return map_logical_viewport(g_gxState.logicalViewport);
+  }
+  const auto offset = offset_scissor();
+  auto shifted = g_gxState.logicalViewport;
+  shifted.left -= static_cast<float>(offset.xOff);
+  shifted.top -= static_cast<float>(offset.yOff);
+  return map_logical_viewport(shifted);
+}
+
+gfx::ClipRect mapped_render_scissor() noexcept {
+  if (!has_scissor_offset()) {
+    return map_logical_scissor(g_gxState.logicalScissor);
+  }
+  return map_logical_scissor(offset_scissor().rect);
+}
+
 void set_logical_viewport(const gfx::Viewport& viewport) noexcept {
   if (viewport.left != g_gxState.logicalViewport.left || viewport.width != g_gxState.logicalViewport.width ||
       viewport.height != g_gxState.logicalViewport.height) {
     g_gxState.dirty |= DirtyUniform;
   }
   g_gxState.logicalViewport = viewport;
-  set_render_viewport(map_logical_viewport(viewport));
+  set_render_viewport(mapped_render_viewport());
+  if (has_scissor_offset()) {
+    set_render_scissor(mapped_render_scissor());
+  }
 }
 
 void set_render_viewport(const gfx::Viewport& viewport) noexcept {
@@ -340,7 +449,10 @@ void set_render_viewport(const gfx::Viewport& viewport) noexcept {
 
 void set_logical_scissor(const gfx::ClipRect& scissor) noexcept {
   g_gxState.logicalScissor = scissor;
-  set_render_scissor(map_logical_scissor(g_gxState.logicalScissor));
+  set_render_scissor(mapped_render_scissor());
+  if (has_scissor_offset()) {
+    set_render_viewport(mapped_render_viewport());
+  }
 }
 
 void set_render_scissor(const gfx::ClipRect& scissor) noexcept {

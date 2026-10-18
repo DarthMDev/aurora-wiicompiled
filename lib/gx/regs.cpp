@@ -134,18 +134,25 @@ void bp_scissor(u8, u32) noexcept {
   const u32 scis0 = g_gxState.bpRegCache[0x20];
   const u32 scis1 = g_gxState.bpRegCache[0x21];
 
+  // Scissor and box offset both carry the 342 view bias; the offset is stored halved.
+  // The EFB rectangle is the scissor minus the offset (Dolphin's BPFunctions).
   const u32 boxOffset = g_gxState.bpRegCache[0x59];
-  // The box offset fields are signed 9-bit values and also halved, like the viewport registers. Sign extend.
-  const s32 offsX = static_cast<s32>(reg_get(boxOffset, 10, 0)) << 23 >> 22;
-  const s32 offsY = static_cast<s32>(reg_get(boxOffset, 10, 10)) << 23 >> 22;
+  const s32 offsetX = static_cast<s32>(reg_get(boxOffset, 10, 0)) * 2 - 342;
+  const s32 offsetY = static_cast<s32>(reg_get(boxOffset, 10, 10)) * 2 - 342;
+  const bool offsetChanged = offsetX != g_gxState.scissorOffsetX || offsetY != g_gxState.scissorOffsetY;
+  g_gxState.scissorOffsetX = offsetX;
+  g_gxState.scissorOffsetY = offsetY;
 
-  const s32 tp = static_cast<s32>(reg_get(scis0, 11, 0)) + offsY;
-  const s32 lf = static_cast<s32>(reg_get(scis0, 11, 12)) + offsX;
-  const s32 bm = static_cast<s32>(reg_get(scis1, 11, 0)) + offsY;
-  const s32 rt = static_cast<s32>(reg_get(scis1, 11, 12)) + offsX;
+  const s32 tp = static_cast<s32>(reg_get(scis0, 11, 0)) - 342;
+  const s32 lf = static_cast<s32>(reg_get(scis0, 11, 12)) - 342;
+  const s32 bm = static_cast<s32>(reg_get(scis1, 11, 0)) - 342;
+  const s32 rt = static_cast<s32>(reg_get(scis1, 11, 12)) - 342;
   const s32 wd = std::max(rt - lf + 1, 0);
   const s32 ht = std::max(bm - tp + 1, 0);
   set_logical_scissor({lf, tp, wd, ht});
+  if (offsetChanged) {
+    set_render_viewport(mapped_render_viewport());
+  }
 }
 
 
