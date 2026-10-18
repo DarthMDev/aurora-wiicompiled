@@ -270,14 +270,16 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
         .srcView = isDepth ? passInfo.copySourceDepthView : passInfo.copySourceView,
         .uniformRange = passInfo.resolveUniformRange,
         .dst = passInfo.resolveTarget,
-        .sampleFilter = needsScaling ? tex_copy_conv::SampleFilter::Linear : tex_copy_conv::SampleFilter::Nearest,
+        // Filter taps must land on exact source rows.
+        .sampleFilter = needsScaling && !passInfo.resolveCopyFilterActive ? tex_copy_conv::SampleFilter::Linear
+                                                                           : tex_copy_conv::SampleFilter::Nearest,
     };
     const bool needsOpaqueAlpha = !isDepth && !gx::efb_has_alpha(convReq.srcFmt);
     const bool sameFormat =
         passInfo.resolveTarget->format == passInfo.colorAttachments[SceneColorAttachmentIndex].format;
     if (needsConversion) {
       tex_copy_conv::run(cmd, convReq);
-    } else if (needsScaling || needsOpaqueAlpha || !sameFormat) {
+    } else if (needsScaling || needsOpaqueAlpha || !sameFormat || passInfo.resolveCopyFilterActive) {
       tex_copy_conv::blit(cmd, convReq);
     } else {
       const webgpu::gpu_prof::Zone zone{cmd, "EFB copy"};

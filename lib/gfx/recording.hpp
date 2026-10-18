@@ -111,9 +111,19 @@ DrawData* get_last_draw_command();
 template <typename PipelineConfig>
 PipelineRef pipeline_ref(const PipelineConfig& config);
 
+// GX copy pipeline settings applied while resolving.
+struct ResolveOptions {
+  // Vertical copy filter taps (prev, current, next); {0, 64, 0} is the identity.
+  std::array<u32, 3> copyFilter{0, 64, 0};
+  // Distance between filter taps in EFB rows of the scaled render target.
+  float copyFilterRowStride = 1.f;
+  bool clampTop = false;
+  bool clampBottom = false;
+};
+
 void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
                        Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat,
-                       GXPixelFmt sourceFormat);
+                       GXPixelFmt sourceFormat, const ResolveOptions& options = {});
 uint32_t align_uniform(uint32_t value);
 Vec2<uint32_t> get_render_target_size() noexcept;
 void set_viewport(const Viewport& viewport) noexcept;

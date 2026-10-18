@@ -416,6 +416,9 @@ struct GXState {
   bool texCopyDstWide = false;
   const void* texCopyDest = nullptr;
   absl::flat_hash_map<const void*, CopyTextureRef> copyTextures;
+  // Display copy target, presented instead of the EFB when the frame produced one.
+  gfx::TextureHandle displayCopyTexture;
+  bool displayCopyProduced = false;
 
   // Cache state
   bool drawsBlocking = false;
@@ -458,7 +461,8 @@ void set_logical_viewport(const gfx::Viewport& viewport) noexcept;
 void set_render_viewport(const gfx::Viewport& viewport) noexcept;
 void set_logical_scissor(const gfx::ClipRect& scissor) noexcept;
 void set_render_scissor(const gfx::ClipRect& scissor) noexcept;
-void copy_tex(const void* dest, GXBool clear) noexcept;
+void copy_tex(const void* dest, GXBool clear, u32 copyControl) noexcept;
+void copy_disp(GXBool clear, u32 copyControl) noexcept;
 const gfx::TextureBind& get_texture(GXTexMapID id) noexcept;
 void resolve_sampled_textures(const ShaderInfo& info) noexcept;
 

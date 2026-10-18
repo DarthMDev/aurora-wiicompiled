@@ -28,7 +28,10 @@ static constexpr std::string_view ShaderPreamble = R"(
 struct Uniforms {
     offset: vec2f,
     scale: vec2f,
-    opaqueAlpha: u32,
+    // GX vertical copy filter taps (prev, current, next); w != 0 when active.
+    copy_filter: vec4f,
+    // x: opaque alpha, y: filter row stride in texels, z/w: clamp UV range for the filter taps.
+    flags: vec4f,
 };
 @group(0) @binding(2) var<uniform> ubuf: Uniforms;
 
@@ -55,9 +58,31 @@ var<private> uvs: array<vec2f, 3> = array(
     return out;
 }
 
+fn apply_opaque_alpha(c: vec4f) -> vec4f {
+    return vec4f(c.rgb, select(c.a, 1.0, ubuf.flags.x != 0.0));
+}
+
+fn clamp_copy_uv(uv: vec2f) -> vec2f {
+    return vec2f(uv.x, clamp(uv.y, ubuf.flags.z, ubuf.flags.w));
+}
+
 fn sample_efb(uv: vec2f) -> vec4f {
-    let c = textureSample(src, src_samp, uv);
-    return vec4f(c.rgb, select(c.a, 1.0, ubuf.opaqueAlpha != 0u));
+    let current = textureSample(src, src_samp, clamp_copy_uv(uv));
+    if (ubuf.copy_filter.w == 0.0) {
+        return apply_opaque_alpha(current);
+    }
+
+    let pixel_size = vec2f(1.0, 1.0) / vec2f(textureDimensions(src));
+    let row_stride = max(ubuf.flags.y, 1.0);
+    let prev = textureSample(src, src_samp, clamp_copy_uv(uv - vec2f(0.0, pixel_size.y * row_stride)));
+    let next = textureSample(src, src_samp, clamp_copy_uv(uv + vec2f(0.0, pixel_size.y * row_stride)));
+    let prev_rgb = floor(prev.rgb * 255.0 + vec3f(0.5));
+    let current_rgb = floor(current.rgb * 255.0 + vec3f(0.5));
+    let next_rgb = floor(next.rgb * 255.0 + vec3f(0.5));
+    let filtered_rgb = min(floor((prev_rgb * ubuf.copy_filter.x + current_rgb * ubuf.copy_filter.y +
+                                  next_rgb * ubuf.copy_filter.z) / 64.0),
+                           vec3f(255.0));
+    return apply_opaque_alpha(vec4f(filtered_rgb / 255.0, current.a));
 }
 
 fn intensity(rgb: vec3f) -> f32 {
@@ -76,6 +101,8 @@ static constexpr std::string_view DepthShaderPreambleBody = R"(
 struct UVTransform {
     offset: vec2f,
     scale: vec2f,
+    copy_filter: vec4f,
+    flags: vec4f,
 };
 @group(0) @binding(1) var<uniform> uv_xf: UVTransform;
 
@@ -102,10 +129,41 @@ var<private> uvs: array<vec2f, 3> = array(
     return out;
 }
 
+fn gx_z24_at_coord(unclamped: vec2i) -> u32 {
+    let texSize = vec2i(textureDimensions(src));
+    let coord = clamp(unclamped, vec2i(0), texSize - vec2i(1));
+    return gx_z24_from_depth(textureLoad(src, coord, 0));
+}
+
+fn gx_depth_bytes(z24: u32) -> vec3u {
+    return vec3u((z24 >> 16u) & 0xffu, (z24 >> 8u) & 0xffu, z24 & 0xffu);
+}
+
+fn clamp_copy_coord(coord: vec2i, texSize: vec2i) -> vec2i {
+    let top = i32(floor(uv_xf.flags.z * f32(texSize.y)));
+    let bottom = i32(floor(uv_xf.flags.w * f32(texSize.y)));
+    return vec2i(coord.x, clamp(coord.y, top, bottom));
+}
+
+// Depth copies run through the vertical copy filter too: each Z byte is filtered independently.
 fn gx_z24(uv: vec2f) -> u32 {
     let texSize = vec2i(textureDimensions(src));
-    let coord = clamp(vec2i(floor(uv * vec2f(texSize))), vec2i(0), texSize - vec2i(1));
-    return gx_z24_from_depth(textureLoad(src, coord, 0));
+    let currentCoord = clamp_copy_coord(vec2i(floor(uv * vec2f(texSize))), texSize);
+    let current = gx_depth_bytes(gx_z24_at_coord(currentCoord));
+    if (uv_xf.copy_filter.w == 0.0) {
+        return (current.r << 16u) | (current.g << 8u) | current.b;
+    }
+    let rowStride = max(i32(round(uv_xf.flags.y)), 1);
+    let prev = gx_depth_bytes(gx_z24_at_coord(clamp_copy_coord(currentCoord - vec2i(0, rowStride), texSize)));
+    let next = gx_depth_bytes(gx_z24_at_coord(clamp_copy_coord(currentCoord + vec2i(0, rowStride), texSize)));
+    let coefficients = vec3u(uv_xf.copy_filter.xyz);
+    var filtered = (prev * coefficients.x + current * coefficients.y + next * coefficients.z) >> vec3u(6u);
+    // The filter accumulator wraps to nine bits when the taps can reach 512, before saturating.
+    if (coefficients.x + coefficients.y + coefficients.z >= 128u) {
+        filtered = filtered & vec3u(0x1ffu);
+    }
+    filtered = min(filtered, vec3u(255u));
+    return (filtered.r << 16u) | (filtered.g << 8u) | filtered.b;
 }
 
 fn z_byte(z24: u32, shift: u32) -> f32 {
@@ -272,12 +330,12 @@ static constexpr std::string_view FragZ8L = R"(
 }
 )"sv;
 
-// GX_TF_Z16: Upper 16 bits of depth -> IA8 (I = Z[23:16], A = Z[15:8])
+// GX_TF_Z16 selects the depth RA8 copy format: alpha 255 and the high Z byte, so sampling as IA8
+// gives high Z as intensity. The middle and low depth bytes are not stored.
 static constexpr std::string_view FragZ16 = R"(
 @fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    let z24 = gx_z24(in.uv);
-    let i = z_byte(z24, 16u);
-    return vec4f(i, i, i, z_byte(z24, 8u));
+    let i = z_byte(gx_z24(in.uv), 16u);
+    return vec4f(i, i, i, 1.0);
 }
 )"sv;
 

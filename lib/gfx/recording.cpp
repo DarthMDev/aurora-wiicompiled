@@ -850,7 +850,7 @@ PipelineRef pipeline_ref(const clear::PipelineConfig& config) {
 
 void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
                        Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat,
-                       GXPixelFmt sourceFormat) {
+                       GXPixelFmt sourceFormat, const ResolveOptions& options) {
   // Resolve current render pass
   auto& prevPass = current_render_passes()[g_recorder.currentRenderPass];
   prevPass.resolveTarget = std::move(texture);
@@ -859,10 +859,19 @@ void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bo
   prevPass.resolveSourceFormat = sourceFormat;
   const auto srcW = static_cast<float>(prevPass.colorAttachments[SceneColorAttachmentIndex].size.width);
   const auto srcH = static_cast<float>(prevPass.colorAttachments[SceneColorAttachmentIndex].size.height);
+  const auto& filter = options.copyFilter;
+  prevPass.resolveCopyFilterActive = filter[0] != 0 || filter[1] != 64 || filter[2] != 0;
+  // The copy clamp pins every filter tap to the first or last source row; without it a filtered
+  // copy at internal resolution samples an unrelated EFB row as a visible border.
+  const float clampTopPixels = options.clampTop ? static_cast<float>(rect.y) : 0.f;
+  const float clampBottomPixels = options.clampBottom ? static_cast<float>(rect.y + rect.height) : srcH;
   const tex_copy_conv::Uniforms uniforms{
       .offset = {static_cast<float>(rect.x) / srcW, static_cast<float>(rect.y) / srcH},
       .scale = {static_cast<float>(rect.width) / srcW, static_cast<float>(rect.height) / srcH},
-      .opaqueAlpha = !gx::efb_has_alpha(sourceFormat),
+      .copyFilter = {static_cast<float>(filter[0]), static_cast<float>(filter[1]), static_cast<float>(filter[2]),
+                     prevPass.resolveCopyFilterActive ? 1.f : 0.f},
+      .flags = {gx::efb_has_alpha(sourceFormat) ? 0.f : 1.f, std::max(options.copyFilterRowStride, 1.f),
+                (clampTopPixels + 0.5f) / srcH, (clampBottomPixels - 0.5f) / srcH},
   };
   prevPass.resolveUniformRange = push_uniform(uniforms);
   enqueue_pass(current_frame_packet(), g_recorder.currentRenderPass);

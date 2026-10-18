@@ -16,10 +16,12 @@ enum class SampleFilter : uint8_t {
 struct alignas(16) Uniforms {
   Vec2<float> offset;
   Vec2<float> scale{1.f, 1.f};
-  uint32_t opaqueAlpha = 0;
-  std::array<uint32_t, 3> _pad{};
+  // GX vertical copy filter taps (prev, current, next) and whether the filter is active.
+  Vec4<float> copyFilter{0.f, 64.f, 0.f, 0.f};
+  // Opaque alpha, filter row stride in texels, clamp UV top and bottom.
+  Vec4<float> flags{0.f, 1.f, 0.f, 1.f};
 };
-static_assert(sizeof(Uniforms) == 32);
+static_assert(sizeof(Uniforms) == 48);
 
 struct ConvRequest {
   GXTexFmt fmt;

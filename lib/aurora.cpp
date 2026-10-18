@@ -371,10 +371,25 @@ void end_frame() noexcept {
   gfx::finish();
   auto imguiDrawData = imgui::freeze();
 
-  const auto& presentSource = webgpu::present_source();
-  const auto viewport = webgpu::calculate_present_viewport(webgpu::g_graphicsConfig.surfaceConfiguration.width,
-                                                           webgpu::g_graphicsConfig.surfaceConfiguration.height,
-                                                           presentSource.size.width, presentSource.size.height);
+  // A display copy (the XFB) is what reaches the screen; post-copy EFB draws must not leak in.
+  webgpu::TextureWithSampler presentSource = webgpu::present_source();
+  gfx::TextureHandle displayCopy;
+  if (gx::g_gxState.displayCopyProduced && gx::g_gxState.displayCopyTexture) {
+    displayCopy = gx::g_gxState.displayCopyTexture;
+    presentSource.texture = displayCopy->texture;
+    presentSource.view = displayCopy->sampleTextureView;
+    presentSource.size = displayCopy->size;
+    presentSource.format = displayCopy->format;
+  }
+  gx::g_gxState.displayCopyProduced = false;
+  const auto surfaceWidth = webgpu::g_graphicsConfig.surfaceConfiguration.width;
+  const auto surfaceHeight = webgpu::g_graphicsConfig.surfaceConfiguration.height;
+  float presentAspect = 0.f;
+  const auto viewport =
+      window::get_present_aspect_ratio(presentAspect)
+          ? webgpu::calculate_present_viewport_for_aspect(surfaceWidth, surfaceHeight, presentAspect)
+          : webgpu::calculate_present_viewport(surfaceWidth, surfaceHeight, presentSource.size.width,
+                                               presentSource.size.height);
 
   wgpu::BindGroup rmlBindGroup;
   bool rmlOverlay = false;
@@ -388,7 +403,8 @@ void end_frame() noexcept {
 
   const bool black = video::is_black();
   const float brightness = video::brightness();
-  gfx::end_frame([black, brightness, rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport,
+  gfx::end_frame([black, brightness, rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport, presentSource,
+                  displayCopy = std::move(displayCopy),
                   imguiDrawData = std::move(imguiDrawData)](
                      wgpu::CommandEncoder& encoder, std::vector<gfx::AfterSubmitCallback> afterSubmitCallbacks) {
     const auto presentMode = webgpu::g_graphicsConfig.surfaceConfiguration.presentMode;
@@ -429,7 +445,7 @@ void end_frame() noexcept {
       if (rmlBindGroup && !rmlOverlay) {
         presentBindGroup = rmlBindGroup;
       } else {
-        const auto& resampledSource = webgpu::resample_present_source(encoder, viewport);
+        const auto& resampledSource = webgpu::resample_present_source(encoder, viewport, presentSource);
         presentBindGroup = webgpu::create_copy_bind_group(resampledSource);
       }
 

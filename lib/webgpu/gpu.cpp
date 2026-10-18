@@ -332,20 +332,27 @@ AuroraSampler get_resampler() noexcept { return g_Resampler; }
 
 Viewport calculate_present_viewport(uint32_t surface_width, uint32_t surface_height, uint32_t content_width,
                                     uint32_t content_height) noexcept {
-  if (surface_width == 0 || surface_height == 0 || content_width == 0 || content_height == 0) {
+  if (content_width == 0 || content_height == 0) {
+    return {};
+  }
+  return calculate_present_viewport_for_aspect(surface_width, surface_height,
+                                               static_cast<float>(content_width) / static_cast<float>(content_height));
+}
+
+Viewport calculate_present_viewport_for_aspect(uint32_t surface_width, uint32_t surface_height,
+                                               float content_aspect) noexcept {
+  if (surface_width == 0 || surface_height == 0 || !(content_aspect > 0.f)) {
     return {};
   }
 
   uint32_t viewport_width = surface_width;
   uint32_t viewport_height = std::min<uint32_t>(
-      surface_height, std::max<uint32_t>(1u, static_cast<uint32_t>(std::lround(static_cast<double>(viewport_width) *
-                                                                               static_cast<double>(content_height) /
-                                                                               static_cast<double>(content_width)))));
+      surface_height, std::max<uint32_t>(1u, static_cast<uint32_t>(std::lround(static_cast<double>(viewport_width) /
+                                                                               static_cast<double>(content_aspect)))));
   if (viewport_height == surface_height) {
     viewport_width = std::min<uint32_t>(
         surface_width, std::max<uint32_t>(1u, static_cast<uint32_t>(std::lround(static_cast<double>(viewport_height) *
-                                                                                static_cast<double>(content_width) /
-                                                                                static_cast<double>(content_height)))));
+                                                                                static_cast<double>(content_aspect)))));
   }
 
   return {
@@ -679,8 +686,8 @@ wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source) {
   return g_device.CreateBindGroup(&bindGroupDescriptor);
 }
 
-const TextureWithSampler& resample_present_source(const wgpu::CommandEncoder& encoder, const Viewport& viewport) {
-  const auto& source = present_source();
+const TextureWithSampler& resample_present_source(const wgpu::CommandEncoder& encoder, const Viewport& viewport,
+                                                  const TextureWithSampler& source) {
   const uint32_t width = viewport_extent(viewport.width);
   const uint32_t height = viewport_extent(viewport.height);
   if (!g_resampledFrameBuffer.view || g_resampledFrameBuffer.size.width != width ||

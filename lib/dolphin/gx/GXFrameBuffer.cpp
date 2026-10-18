@@ -31,8 +31,87 @@ aurora::Vec2<uint32_t> scale_copy_dst(u32 logicalWidth, u32 logicalHeight) {
 }
 } // namespace
 
+namespace {
+// Vertical copy filter taps from BP 0x53/0x54, folded to (prev, current, next) rows.
+std::array<u32, 3> copy_filter_taps() noexcept {
+  const u32 f0 = g_gxState.bpRegCache[0x53];
+  const u32 f1 = g_gxState.bpRegCache[0x54];
+  if (!g_gxState.bpRegValid.test(0x53) || !g_gxState.bpRegValid.test(0x54)) {
+    return {0, 64, 0};
+  }
+  const auto tap = [](u32 value, u32 shift) { return (value >> shift) & 0x3fu; };
+  return {
+      tap(f0, 0) + tap(f0, 6),
+      tap(f0, 12) + tap(f0, 18) + tap(f1, 0),
+      tap(f1, 6) + tap(f1, 12),
+  };
+}
+
+u16 num_xfb_lines(u16 efbHeight, u32 iScale) noexcept {
+  if (efbHeight == 0 || iScale == 0) {
+    return efbHeight;
+  }
+  const u32 count = static_cast<u32>(efbHeight - 1u) * 0x100u;
+  u32 realHeight = count / iScale + 1u;
+  u32 reducedScale = iScale;
+  if (reducedScale > 0x80u && reducedScale < 0x100u) {
+    while ((reducedScale & 1u) == 0u) {
+      reducedScale >>= 1;
+    }
+    if (efbHeight % reducedScale == 0u) {
+      ++realHeight;
+    }
+  }
+  return static_cast<u16>(std::min<u32>(realHeight, 0x400u));
+}
+
+u32 y_scale_to_integer(f32 yScale) noexcept { return yScale > 0.f ? static_cast<u32>(256.f / yScale) & 0x1ffu : 256u; }
+
+// Producer-side mirror of the display copy source height, for GXSetDispCopyYScale's return value.
+u16 sDispCopySrcHeight = 0;
+} // namespace
+
 namespace aurora::gx {
-void copy_tex(const void* dest, GXBool clear) noexcept {
+void copy_disp(GXBool clear, u32 copyControl) noexcept {
+  const u32 src0 = g_gxState.bpRegCache[0x49];
+  const u32 src1 = g_gxState.bpRegCache[0x4A];
+  const gfx::ClipRect src{
+      .x = static_cast<int32_t>(src0 & 0x3ffu),
+      .y = static_cast<int32_t>((src0 >> 10) & 0x3ffu),
+      .width = static_cast<int32_t>((src1 & 0x3ffu) + 1),
+      .height = static_cast<int32_t>(((src1 >> 10) & 0x3ffu) + 1),
+  };
+  const u32 stride = g_gxState.bpRegCache[0x4D] & 0x3ffu;
+  const u32 logicalDstWidth = stride != 0 ? stride * 16u : static_cast<u32>(src.width);
+  const u32 iScale = g_gxState.bpRegValid.test(0x4E) ? g_gxState.bpRegCache[0x4E] & 0x1ffu : 256u;
+  const u32 logicalDstHeight = num_xfb_lines(static_cast<u16>(src.height), iScale);
+  const auto rect = map_logical_scissor(src);
+  const auto [dstWidth, dstHeight] = scale_copy_dst(std::max<u32>(logicalDstWidth, 1), std::max<u32>(logicalDstHeight, 1));
+
+  auto& texture = g_gxState.displayCopyTexture;
+  if (!texture || texture->size.width != dstWidth || texture->size.height != dstHeight) {
+    texture = gfx::new_render_texture(dstWidth, dstHeight, GX_TF_RGBA8, "Display Copy");
+  }
+
+  auto filter = copy_filter_taps();
+  if (g_config.disableCopyFilter) {
+    filter = {0, filter[0] + filter[1] + filter[2], 0};
+  }
+  const auto clearColor = clear && g_gxState.colorUpdate;
+  const auto clearAlpha = clear && g_gxState.alphaUpdate && efb_has_alpha(g_gxState.pixelFmt);
+  const auto clearDepth = clear && g_gxState.depthUpdate;
+  gfx::resolve_pass_into(texture, rect, clearColor, clearAlpha, clearDepth, g_gxState.clearColor, clear_depth_value(),
+                         GX_TF_RGBA8, g_gxState.pixelFmt,
+                         {
+                             .copyFilter = filter,
+                             .copyFilterRowStride = static_cast<float>(rect.height) / std::max(src.height, 1),
+                             .clampTop = (copyControl & GX_CLAMP_TOP) != 0,
+                             .clampBottom = (copyControl & GX_CLAMP_BOTTOM) != 0,
+                         });
+  g_gxState.displayCopyProduced = true;
+}
+
+void copy_tex(const void* dest, GXBool clear, u32 copyControl) noexcept {
   const auto rect = map_logical_scissor(g_gxState.texCopySrc);
   const auto [dstWidth, dstHeight] = scale_copy_dst(g_gxState.texCopyDstWidth, g_gxState.texCopyDstHeight);
   const auto texCopyFmt = g_gxState.texCopyFmt;
@@ -50,8 +129,15 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
   const auto clearColor = clear && g_gxState.colorUpdate;
   const auto clearAlpha = clear && g_gxState.alphaUpdate && efb_has_alpha(g_gxState.pixelFmt);
   const auto clearDepth = clear && g_gxState.depthUpdate;
+  const auto src = g_gxState.texCopySrc;
   gfx::resolve_pass_into(copy.handle, rect, clearColor, clearAlpha, clearDepth, g_gxState.clearColor,
-                         clear_depth_value(), texCopyFmt, g_gxState.pixelFmt);
+                         clear_depth_value(), texCopyFmt, g_gxState.pixelFmt,
+                         {
+                             .copyFilter = copy_filter_taps(),
+                             .copyFilterRowStride = static_cast<float>(rect.height) / std::max(src.height, 1),
+                             .clampTop = (copyControl & GX_CLAMP_TOP) != 0,
+                             .clampBottom = (copyControl & GX_CLAMP_BOTTOM) != 0,
+                         });
 }
 } // namespace aurora::gx
 
@@ -139,7 +225,13 @@ void GXAdjustForOverscan(GXRenderModeObj* rmin, GXRenderModeObj* rmout, u16 hor,
   rmout->viYOrigin = in.viYOrigin + ver;
 }
 
-void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {}
+void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
+  sDispCopySrcHeight = ht;
+  GX_WRITE_RAS_REG(0x49000000u | ((static_cast<u32>(top) & 0x3ffu) << 10) | (static_cast<u32>(left) & 0x3ffu));
+  GX_WRITE_RAS_REG(0x4A000000u | (((static_cast<u32>(ht) - 1u) & 0x3ffu) << 10) |
+                   ((static_cast<u32>(wd) - 1u) & 0x3ffu));
+  __gx->bpSent = 0;
+}
 
 void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
   GX_WRITE_AURORA(GX_AURORA_LOAD_COPY_SRC);
@@ -149,7 +241,11 @@ void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
   GX_WRITE_U32(ht);
 }
 
-void GXSetDispCopyDst(u16 wd, u16 ht) {}
+void GXSetDispCopyDst(u16 wd, u16 ht) {
+  (void)ht;
+  GX_WRITE_RAS_REG(0x4D000000u | ((((static_cast<u32>(wd) & 0x7fffu) << 1) >> 5) & 0x3ffu));
+  __gx->bpSent = 0;
+}
 
 void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
   GX_WRITE_AURORA(GX_AURORA_LOAD_COPY_DST);
@@ -169,7 +265,12 @@ void GXSetCopyClamp(GXFBClamp clamp) {
 	SET_REG_FIELD(0, __gx->cpTex, 1, 1, (clamp & GX_CLAMP_BOTTOM) != 0);
 }
 
-u32 GXSetDispCopyYScale(f32 vscale) { return 0; }
+u32 GXSetDispCopyYScale(f32 vscale) {
+  const u32 iScale = y_scale_to_integer(vscale);
+  GX_WRITE_RAS_REG(0x4E000000u | iScale);
+  __gx->bpSent = 0;
+  return num_xfb_lines(sDispCopySrcHeight, iScale);
+}
 
 void GXSetCopyClear(GXColor color, u32 depth) {
   // BP 0x4F: clear color R + A
@@ -194,11 +295,45 @@ void GXSetCopyClear(GXColor color, u32 depth) {
   __gx->bpSent = 1;
 }
 
-void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]) {}
+void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]) {
+  u8 samples[12][2];
+  for (int i = 0; i < 12; ++i) {
+    for (int j = 0; j < 2; ++j) {
+      samples[i][j] = aa && sample_pattern != nullptr ? sample_pattern[i][j] : 6;
+    }
+  }
+  for (u32 reg = 0; reg < 4; ++reg) {
+    u32 value = (0x01u + reg) << 24;
+    for (u32 i = 0; i < 6; ++i) {
+      const u32 sample = reg * 6 + i;
+      value |= (static_cast<u32>(samples[sample / 2][sample % 2]) & 0x0fu) << (i * 4);
+    }
+    GX_WRITE_RAS_REG(value);
+  }
 
-void GXSetDispCopyGamma(GXGamma gamma) {}
+  static constexpr u8 kNoFilter[7] = {0, 0, 21, 22, 21, 0, 0};
+  const u8* taps = vf && vfilter != nullptr ? vfilter : kNoFilter;
+  GX_WRITE_RAS_REG(0x53000000u | (static_cast<u32>(taps[0] & 0x3fu) << 0) | (static_cast<u32>(taps[1] & 0x3fu) << 6) |
+                   (static_cast<u32>(taps[2] & 0x3fu) << 12) | (static_cast<u32>(taps[3] & 0x3fu) << 18));
+  GX_WRITE_RAS_REG(0x54000000u | (static_cast<u32>(taps[4] & 0x3fu) << 0) | (static_cast<u32>(taps[5] & 0x3fu) << 6) |
+                   (static_cast<u32>(taps[6] & 0x3fu) << 12));
+  __gx->bpSent = 0;
+}
 
-void GXCopyDisp(void* dest, GXBool clear) {}
+void GXSetDispCopyGamma(GXGamma gamma) { SET_REG_FIELD(0, __gx->cpDisp, 2, 7, gamma); }
+
+void GXCopyDisp(void* dest, GXBool clear) {
+  (void)dest;
+  if (__gx->dirtyState != 0) {
+    __GXSetDirtyState();
+  }
+  u32 control = __gx->cpDisp;
+  SET_REG_FIELD(0, control, 1, 11, clear != GX_FALSE);
+  SET_REG_FIELD(0, control, 1, 14, 1);
+  SET_REG_FIELD(0, control, 8, 24, 0x52);
+  GX_WRITE_RAS_REG(control);
+  __gx->bpSent = 0;
+}
 
 void GXCopyTex(void* dest, GXBool clear) {
   GX_WRITE_AURORA(GX_AURORA_LOAD_COPY_DEST);
