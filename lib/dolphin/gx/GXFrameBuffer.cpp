@@ -28,10 +28,10 @@ u16 sTexCopyHeight = 0;
 GXTexFmt sTexCopyFmt = GX_TF_I8;
 std::unordered_map<void*, AuroraReadbackStream> sProbeStreams;
 
-// Probe-sized copies (e.g. a lens-flare depth test) are read back into guest RAM a few frames late.
+// Probe-sized depth copies (e.g. a lens-flare occlusion test) are read back into guest RAM a few frames late.
 void read_back_probe(void* dest) {
   const u32 size = aurora::gfx::readback::byte_size(sTexCopyFmt, sTexCopyWidth, sTexCopyHeight);
-  if (dest == nullptr || size == 0 || size > ProbeMaxBytes) {
+  if (dest == nullptr || !aurora::gx::is_depth_format(sTexCopyFmt) || size == 0 || size > ProbeMaxBytes) {
     return;
   }
   auto it = sProbeStreams.find(dest);

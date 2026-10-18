@@ -615,17 +615,26 @@ constexpr auto kBpRegs = [] {
 // CP register decode
 
 // Matrix index A (0x30)
+void set_tex_mtx_index(u32 texCoord, u32 index) noexcept {
+  const auto texMtx = static_cast<GXTexMtx>(index);
+  if (texMtx > GX_IDENTITY || g_gxState.tcgs[texCoord].mtx == texMtx) {
+    return;
+  }
+  g_gxState.tcgs[texCoord].mtx = texMtx;
+  g_gxState.dirty |= DirtyPipeline;
+}
+
 void cp_mtx_index(u8, u32 value) noexcept {
   g_gxState.currentPnMtx = reg_get(value, 6, 0) / 3;
   for (u32 i = 0; i < 4; i++) {
-    g_gxState.tcgs[i].mtx = static_cast<GXTexMtx>(reg_get(value, 6, 6 + i * 6));
+    set_tex_mtx_index(i, reg_get(value, 6, 6 + i * 6));
   }
   g_gxState.xfRegValid.reset(0x18);
 }
 
 void cp_mtx_index_b(u8, u32 value) noexcept {
   for (u32 i = 0; i < 4 && (i + 4) < MaxTexCoord; i++) {
-    g_gxState.tcgs[i + 4].mtx = static_cast<GXTexMtx>(reg_get(value, 6, i * 6));
+    set_tex_mtx_index(i + 4, reg_get(value, 6, i * 6));
   }
   g_gxState.xfRegValid.reset(0x19);
 }
@@ -735,8 +744,8 @@ void cp_array_stride(u8 addr, u32 value) noexcept {
 
 constexpr auto kCpRegs = [] {
   std::array<RegHandler, 0x100> regs{};
-  regs[0x30] = {cp_mtx_index, DirtyImmediates | DirtyPipeline};
-  regs[0x40] = {cp_mtx_index_b, DirtyPipeline};
+  regs[0x30] = {cp_mtx_index, DirtyImmediates};
+  regs[0x40] = {cp_mtx_index_b};
   regs[0x50] = {cp_vcd_lo, DirtyPipeline};
   regs[0x60] = {cp_vcd_hi, DirtyPipeline};
   for (u8 i = 0; i < 8; ++i) {
