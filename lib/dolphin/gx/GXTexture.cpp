@@ -294,6 +294,22 @@ void GXLoadTexObj(GXTexObj* obj_, GXTexMapID id) {
 }
 
 u32 GXGetTexBufferSize(u16 width, u16 height, u32 fmt, GXBool mips, u8 maxLod) {
+  if (fmt == GX_TF_R8_PC || fmt == GX_TF_RGBA8_PC) {
+    const u32 bytesPerPixel = fmt == GX_TF_R8_PC ? 1u : 4u;
+    const u32 mipCount = mips ? static_cast<u32>(maxLod) + 1u : 1u;
+    u64 byteCount = 0;
+    for (u32 mip = 0; mip < mipCount; ++mip) {
+      byteCount += static_cast<u64>(width) * height * bytesPerPixel;
+      if (width == 1 && height == 1) {
+        break;
+      }
+      width = std::max<u16>(width / 2, 1);
+      height = std::max<u16>(height / 2, 1);
+    }
+    CHECK(byteCount <= UINT32_MAX, "GXGetTexBufferSize: linear PC texture is too large ({} bytes)", byteCount);
+    return static_cast<u32>(byteCount);
+  }
+
   s32 shiftX = 0;
   s32 shiftY = 0;
   switch (fmt) {
@@ -339,7 +355,8 @@ u32 GXGetTexBufferSize(u16 width, u16 height, u32 fmt, GXBool mips, u8 maxLod) {
   u32 bitSize = fmt == GX_TF_RGBA8 || fmt == GX_TF_Z24X8 ? 64 : 32;
   u32 bufLen = 0;
   if (mips) {
-    while (maxLod != 0) {
+    const u32 mipCount = static_cast<u32>(maxLod) + 1;
+    for (u32 mip = 0; mip < mipCount; ++mip) {
       const u32 tileX = ((width + (1 << shiftX) - 1) >> shiftX);
       const u32 tileY = ((height + (1 << shiftY) - 1) >> shiftY);
       bufLen += bitSize * tileX * tileY;
@@ -350,8 +367,7 @@ u32 GXGetTexBufferSize(u16 width, u16 height, u32 fmt, GXBool mips, u8 maxLod) {
 
       width = (width < 2) ? 1 : width / 2;
       height = (height < 2) ? 1 : height / 2;
-      --maxLod;
-    };
+    }
   } else {
     const u32 tileX = ((width + (1 << shiftX) - 1) >> shiftX);
     const u32 tileY = ((height + (1 << shiftY) - 1) >> shiftY);

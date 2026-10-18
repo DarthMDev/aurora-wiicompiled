@@ -1009,13 +1009,26 @@ void handle_cp(u8 addr, u32 value) noexcept {
   }
 }
 
+// Malformed guest XF writes are skipped, never written out of bounds.
+#define XF_REQUIRE(cond, msg, ...)                                                                                     \
+  do {                                                                                                                 \
+    if (!(cond)) {                                                                                                     \
+      static int sLogged = 0;                                                                                          \
+      if (sLogged < 16) {                                                                                              \
+        ++sLogged;                                                                                                     \
+        Log.warn(msg, ##__VA_ARGS__);                                                                                  \
+      }                                                                                                                \
+      return false;                                                                                                    \
+    }                                                                                                                  \
+  } while (0)
+
 bool copy_xf_data(u32 addr, const u8* data, u32 len, std::endian e) noexcept {
   if (addr < 0x78) {
     // Position matrices (0x0000-0x0077)
     u32 mtxIdx = addr / 12;
     u32 startOffset = addr % 12;
-    CHECK(mtxIdx < MaxPnMtx, "XF: PosMtx copy oob? Should never happen; mtxIdx={}", mtxIdx);
-    CHECK(startOffset == 0 && len == 12, "XF: PosMtx sub-copy unsupported: offs={}, len={}", startOffset, len);
+    XF_REQUIRE(mtxIdx < MaxPnMtx, "XF: PosMtx copy oob? Should never happen; mtxIdx={}", mtxIdx);
+    XF_REQUIRE(startOffset == 0 && len == 12, "XF: PosMtx sub-copy unsupported: offs={}, len={}", startOffset, len);
     f32* flat = reinterpret_cast<f32*>(&g_gxState.pnMtx[mtxIdx].pos);
     bool changed = false;
     for (u32 i = 0; i < len; i++) {
@@ -1031,8 +1044,8 @@ bool copy_xf_data(u32 addr, const u8* data, u32 len, std::endian e) noexcept {
     u32 texBase = addr - 0x078;
     u32 mtxIdx = texBase / 12;
     u32 startOffset = texBase % 12;
-    CHECK(mtxIdx < MaxTexMtx, "XF TexMtx copy oob? Should never happen; mtxIdx={}", mtxIdx);
-    CHECK(startOffset == 0 && (len == 8 || len == 12), "XF TexMtx sub-copy unsupported: offs={}, len={}", startOffset,
+    XF_REQUIRE(mtxIdx < MaxTexMtx, "XF TexMtx copy oob? Should never happen; mtxIdx={}", mtxIdx);
+    XF_REQUIRE(startOffset == 0 && (len == 8 || len == 12), "XF TexMtx sub-copy unsupported: offs={}, len={}", startOffset,
           len);
 
     f32* flat = reinterpret_cast<f32*>(&g_gxState.texMtxs[mtxIdx]);
@@ -1060,8 +1073,8 @@ bool copy_xf_data(u32 addr, const u8* data, u32 len, std::endian e) noexcept {
     u32 nrmBase = addr - 0x400;
     u32 mtxIdx = nrmBase / 9;
     u32 startOffset = nrmBase % 9;
-    CHECK(mtxIdx < MaxPnMtx, "XF: NrmMtx copy oob? Should never happen; mtxIdx={}", mtxIdx);
-    CHECK(startOffset == 0 && len == 9, "XF: NrmMtx sub-copy unsupported: offs={}, len={}", startOffset, len);
+    XF_REQUIRE(mtxIdx < MaxPnMtx, "XF: NrmMtx copy oob? Should never happen; mtxIdx={}", mtxIdx);
+    XF_REQUIRE(startOffset == 0 && len == 9, "XF: NrmMtx sub-copy unsupported: offs={}, len={}", startOffset, len);
     f32* flat = reinterpret_cast<f32*>(&g_gxState.pnMtx[mtxIdx].nrm);
     bool changed = false;
     for (u32 i = 0; i < len; i++) {
@@ -1080,8 +1093,8 @@ bool copy_xf_data(u32 addr, const u8* data, u32 len, std::endian e) noexcept {
     u32 ptBase = addr - 0x500;
     u32 mtxIdx = ptBase / 12;
     u32 startOffset = ptBase % 12;
-    CHECK(mtxIdx < MaxPTTexMtx, "XF: PTTexMtx copy oob? Should never happen; mtxIdx={}", mtxIdx);
-    CHECK(startOffset == 0 && len == 12, "XF: PTTexMtx sub-copy unsupported: offs={}, len={}", startOffset, len);
+    XF_REQUIRE(mtxIdx < MaxPTTexMtx, "XF: PTTexMtx copy oob? Should never happen; mtxIdx={}", mtxIdx);
+    XF_REQUIRE(startOffset == 0 && len == 12, "XF: PTTexMtx sub-copy unsupported: offs={}, len={}", startOffset, len);
     f32* flat = reinterpret_cast<f32*>(&g_gxState.ptTexMtxs[mtxIdx]);
     bool changed = false;
     for (u32 i = 0; i < len; i++) {
@@ -1107,8 +1120,8 @@ bool copy_xf_data(u32 addr, const u8* data, u32 len, std::endian e) noexcept {
     u32 lightBase = addr - 0x600;
     u32 lightIdx = lightBase / 0x10;
     u32 startOffset = lightBase % 0x10;
-    CHECK(lightIdx < 8, "XF: Light copy oob? Should never happen; lightIdx={}", lightIdx);
-    CHECK(startOffset + len <= 0x10, "XF: Light copy that crosses across light boundaries unsupported: offs={}, len={}",
+    XF_REQUIRE(lightIdx < 8, "XF: Light copy oob? Should never happen; lightIdx={}", lightIdx);
+    XF_REQUIRE(startOffset + len <= 0x10, "XF: Light copy that crosses across light boundaries unsupported: offs={}, len={}",
           startOffset, len);
     auto& light = g_gxState.lights[lightIdx];
     bool changed = false;

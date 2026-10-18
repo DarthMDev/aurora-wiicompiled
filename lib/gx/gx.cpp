@@ -131,8 +131,8 @@ wgpu::BlendState to_blend_state(GXBlendMode mode, GXBlendFactor srcFac, GXBlendF
     };
     break;
   case GX_BM_LOGIC:
+    // WebGPU has no fixed-function integer logic op; approximate the rest with blending.
     switch (op) {
-      DEFAULT_FATAL("unsupported logic op {}", underlying(op));
     case GX_LO_CLEAR:
       colorBlendComponent = {
           .operation = wgpu::BlendOperation::Add,
@@ -140,6 +140,32 @@ wgpu::BlendState to_blend_state(GXBlendMode mode, GXBlendFactor srcFac, GXBlendF
           .dstFactor = wgpu::BlendFactor::Zero,
       };
       break;
+    case GX_LO_INVAND:
+      colorBlendComponent = {
+          .operation = wgpu::BlendOperation::Add,
+          .srcFactor = wgpu::BlendFactor::Zero,
+          .dstFactor = wgpu::BlendFactor::OneMinusSrc,
+      };
+      break;
+    case GX_LO_OR:
+      colorBlendComponent = {
+          .operation = wgpu::BlendOperation::Max,
+          .srcFactor = wgpu::BlendFactor::One,
+          .dstFactor = wgpu::BlendFactor::One,
+      };
+      break;
+    case GX_LO_AND:
+    case GX_LO_REVAND:
+    case GX_LO_XOR:
+    case GX_LO_NOR:
+    case GX_LO_EQUIV:
+    case GX_LO_INV:
+    case GX_LO_REVOR:
+    case GX_LO_INVCOPY:
+    case GX_LO_INVOR:
+    case GX_LO_NAND:
+    case GX_LO_SET:
+    default:
     case GX_LO_COPY:
       colorBlendComponent = {
           .operation = wgpu::BlendOperation::Add,

@@ -39,10 +39,10 @@ u32 prepare_idx_buffer(ByteBuffer& buf, GXPrimitive prim, u16 vtxStart, u16 vtxC
 	u32 count;
 	if (prim == GX_QUADS) {
 		slot = 0;
-		count = ((u32(vtxCount) + 3) / 4) * 6;
+		count = (u32(vtxCount) / 4) * 6 + (vtxCount % 4 == 3 ? 3 : 0);
 	} else if (prim == GX_TRIANGLES) {
 		slot = 1;
-		count = vtxCount;
+		count = vtxCount - vtxCount % 3;
 	} else if (prim == GX_TRIANGLEFAN) {
 		slot = 2;
 		count = vtxCount;
@@ -268,10 +268,15 @@ ProcessResult process(const u8* data, u32 size) noexcept {
       auto const& array = g_gxState.arrays[arrayType];
       const u32 srcOffset = static_cast<u32>(srcArrayIdx) * array.stride;
       const u32 srcSize = static_cast<u32>(len) * sizeof(u32);
-      AURORA_ASSERT(array.data != nullptr, "indexed XF load from unmapped array {}", arrayType);
-      AURORA_ASSERT(srcOffset <= array.size && srcSize <= array.size - srcOffset,
-                    "indexed XF load outside array {}: offset={}, size={}, array size={}", arrayType, srcOffset,
-                    srcSize, array.size);
+      if (array.data == nullptr || srcOffset > array.size || srcSize > array.size - srcOffset) {
+        static int sLogged = 0;
+        if (sLogged < 16) {
+          ++sLogged;
+          Log.warn("Skipping indexed XF load outside array {}: offset={}, size={}, array size={}", arrayType,
+                   srcOffset, srcSize, array.data != nullptr ? array.size : 0);
+        }
+        break;
+      }
       auto const* srcData = static_cast<const u8*>(array.data) + srcOffset;
       if (!copy_xf_data(dstAddr, srcData, len, array.le ? std::endian::little : std::endian::big)) {
 #ifndef NDEBUG
@@ -330,9 +335,15 @@ ProcessResult process(const u8* data, u32 size) noexcept {
             else
               hex += fmt::format(" {:02x}", data[i]);
           }
-          Log.error("  hex dump (pos {}-{}):{}", dumpStart, dumpEnd - 1, hex);
+          static int sLogged = 0;
+          if (sLogged < 16) {
+            ++sLogged;
+            Log.warn("command_processor: unknown opcode 0x{:02X} at pos {}, skipping the rest of the buffer",
+                     cmd, reader.offset() - 1);
+            Log.warn("  hex dump (pos {}-{}):{}", dumpStart, dumpEnd - 1, hex);
+          }
         }
-        FATAL("command_processor: unknown opcode 0x{:02X} at pos {}", cmd, reader.offset() - 1);
+        reader.skip(reader.remaining());
       }
       break;
     }
@@ -340,7 +351,13 @@ ProcessResult process(const u8* data, u32 size) noexcept {
   return {size, false};
 }
 
-[[noreturn]] static void handle_draw_overrun(size_t totalVtxBytes, const ByteReader& reader) noexcept {
+static void handle_draw_overrun(size_t totalVtxBytes, ByteReader& reader) noexcept {
+  static int sLogged = 0;
+  if (sLogged >= 64) {
+    reader.skip(reader.remaining());
+    return;
+  }
+  ++sLogged;
   // Hex dump around the draw command for debugging
   const size_t pos = reader.offset();
   const size_t size = reader.size();
@@ -355,8 +372,30 @@ ProcessResult process(const u8* data, u32 size) noexcept {
     else
       hex += fmt::format(" {:02x}", data[i]);
   }
-  Log.error("  hex dump around draw cmd (pos {}-{}):{}", dumpStart, dumpEnd - 1, hex);
-  FATAL("draw vertex data overrun: need {} bytes at pos {}, have {}", totalVtxBytes, pos, reader.remaining());
+  Log.warn("draw vertex data overrun: need {} bytes at pos {}, have {}; skipping the rest of the buffer",
+           totalVtxBytes, pos, reader.remaining());
+  Log.warn("  hex dump around draw cmd (pos {}-{}):{}", dumpStart, dumpEnd - 1, hex);
+  reader.skip(reader.remaining());
+}
+
+// Vertices a primitive actually uses: incomplete trailing primitives are never drawn, so they
+// cannot join a later merged draw either.
+static u16 usable_vertex_count(GXPrimitive prim, u16 vtxCount) noexcept {
+  switch (prim) {
+  case GX_QUADS:
+    return vtxCount % 4 == 3 ? vtxCount : vtxCount - vtxCount % 4;
+  case GX_TRIANGLES:
+    return vtxCount - vtxCount % 3;
+  case GX_TRIANGLESTRIP:
+  case GX_TRIANGLEFAN:
+    return vtxCount >= 3 ? vtxCount : 0;
+  case GX_LINES:
+    return vtxCount - vtxCount % 2;
+  case GX_LINESTRIP:
+    return vtxCount >= 2 ? vtxCount : 0;
+  default:
+    return vtxCount;
+  }
 }
 
 static u32 calc_vtx_size(GXVtxFmt fmt) noexcept {
@@ -504,7 +543,26 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& 
 
   u32 totalVtxBytes = vtxCount * vtxSize;
   if (totalVtxBytes > reader.remaining())
-    UNLIKELY { handle_draw_overrun(totalVtxBytes, reader); }
+    UNLIKELY {
+      handle_draw_overrun(totalVtxBytes, reader);
+      return;
+    }
+
+  const u16 usableCount = usable_vertex_count(prim, vtxCount);
+  const bool culledAll =
+      g_gxState.cullMode == GX_CULL_ALL && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS;
+  if (usableCount == 0 || culledAll) {
+    reader.skip(totalVtxBytes);
+    return;
+  }
+  if (usableCount != vtxCount) {
+    const u32 usableBytes = usableCount * vtxSize;
+    const auto usableData = reader.take(usableBytes);
+    reader.skip(totalVtxBytes - usableBytes);
+    ByteReader usableReader{usableData.data(), usableData.size()};
+    draw_prim(prim, fmt, usableCount, usableReader);
+    return;
+  }
 
   const bool cleanState = g_gxState.dirty == 0 && fmt == sDrawCache.lastDrawFmt && sDrawCache.lineMode == 0 &&
                           prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS;
@@ -556,7 +614,11 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& 
 
 static void handle_draw(u8 cmd, ByteReader& reader) noexcept {
   const auto fmt = static_cast<GXVtxFmt>(cmd & CP_VAT_MASK);
-  const auto prim = static_cast<GXPrimitive>(cmd & CP_OPCODE_MASK);
+  auto prim = static_cast<GXPrimitive>(cmd & CP_OPCODE_MASK);
+  // 0x88 is the hardware alias of the quad opcode.
+  if (prim == static_cast<GXPrimitive>(0x88)) {
+    prim = GX_QUADS;
+  }
   draw_prim(prim, fmt, reader.read<u16>(), reader);
 }
 
