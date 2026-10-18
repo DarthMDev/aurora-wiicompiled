@@ -95,8 +95,14 @@ typedef struct PADStatus {
   s8 stickY;
   s8 substickX;
   s8 substickY;
-  u8 triggerLeft;
-  u8 triggerRight;
+  union {
+    u8 triggerLeft;
+    u8 triggerL;
+  };
+  union {
+    u8 triggerRight;
+    u8 triggerR;
+  };
   u8 analogA;
   u8 analogB;
   s8 err;
@@ -170,6 +176,24 @@ typedef struct PADButtonMapping {
   PADButton padButton;
 } PADButtonMapping;
 
+// Explicitly disabled, unlike INVALID which permits default L/R trigger input.
+#define PAD_NATIVE_BUTTON_DISABLED 0xfffffffeu
+
+#ifdef __cplusplus
+// Axis-to-button bindings share the persisted nativeButton field without
+// changing the binary layout of existing controller mapping files.
+constexpr u32 PADEncodeAxisButton(u32 axis, bool negative, u32 threshold = 50) {
+  return 0x10000u | axis | (negative ? 0x80u : 0u) | (threshold << 8);
+}
+constexpr bool PADIsAxisButton(u32 binding) { return (binding & 0xffff0000u) == 0x10000u; }
+constexpr u32 PADAxisButtonThreshold(u32 binding) { return (binding >> 8) & 0xffu; }
+constexpr u32 PADAxisButtonAxis(u32 binding) { return binding & 0x7fu; }
+constexpr bool PADAxisButtonNegative(u32 binding) { return (binding & 0x80u) != 0; }
+constexpr u32 PADAxisButtonIdentity(u32 binding) {
+  return PADIsAxisButton(binding) ? (binding & ~0xff00u) : binding;
+}
+#endif
+
 typedef struct PADAxisMapping {
   PADSignedNativeAxis nativeAxis;
   s32 nativeButton;
@@ -193,6 +217,9 @@ const char* PADGetName(u32 port);
 void PADSetButtonMapping(u32 port, PADButtonMapping mapping);
 void PADSetAllButtonMappings(u32 port, PADButtonMapping buttons[PAD_BUTTON_COUNT]);
 PADButtonMapping* PADGetButtonMappings(u32 port, u32* buttonCount);
+// Secondary physical button per GC button; not persisted.
+void PADSetAltButtonMapping(u32 port, PADButtonMapping mapping);
+PADButtonMapping* PADGetAltButtonMappings(u32 port, u32* buttonCount);
 void PADSetAxisMapping(u32 port, PADAxisMapping mapping);
 void PADSetAllAxisMappings(u32 port, PADAxisMapping axes[PAD_AXIS_COUNT]);
 PADAxisMapping* PADGetAxisMappings(u32 port, u32* axisCount);

@@ -423,14 +423,19 @@ void PADSetPortForIndex(const u32 idx, const u32 port) {
     return;
   }
 
-  const int32_t oldPort = SDL_GetGamepadPlayerIndex(ctrl->m_controller);
+  if (port >= PAD_MAX_CONTROLLERS) {
+    return;
+  }
+
+  const auto instance = SDL_GetGamepadID(ctrl->m_controller);
+  const int32_t oldPort = aurora::gamepad::player_index(instance);
   if (const auto* dest = aurora::gamepad::get_controller_for_player(port); dest != nullptr && dest != ctrl) {
-    SDL_SetGamepadPlayerIndex(dest->m_controller, -1);
+    aurora::gamepad::set_player_index(SDL_GetGamepadID(dest->m_controller), -1);
   }
   if (oldPort >= 0 && oldPort != port) {
     aurora::gamepad::persist_controller_for_player(oldPort, nullptr);
   }
-  SDL_SetGamepadPlayerIndex(ctrl->m_controller, static_cast<Sint32>(port));
+  aurora::gamepad::set_player_index(instance, static_cast<Sint32>(port));
   aurora::gamepad::persist_controller_for_player(port, ctrl);
 }
 
@@ -456,11 +461,40 @@ void PADClearPort(const u32 port) {
   if (ctrl == nullptr) {
     return;
   }
-  SDL_SetGamepadPlayerIndex(ctrl->m_controller, -1);
+  aurora::gamepad::set_player_index(SDL_GetGamepadID(ctrl->m_controller), -1);
+}
+
+// SDL's hidapi Wii driver posts ZL/ZR as trigger axes, never as shoulder buttons, so L/R are
+// left unbound and picked up by the default axis mapping like every analog-trigger pad.
+constexpr std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsWiiUPro{{
+    {SDL_GAMEPAD_BUTTON_EAST, PAD_BUTTON_A},
+    {SDL_GAMEPAD_BUTTON_SOUTH, PAD_BUTTON_B},
+    {SDL_GAMEPAD_BUTTON_NORTH, PAD_BUTTON_X},
+    {SDL_GAMEPAD_BUTTON_WEST, PAD_BUTTON_Y},
+    {SDL_GAMEPAD_BUTTON_START, PAD_BUTTON_START},
+    {SDL_GAMEPAD_BUTTON_BACK, PAD_TRIGGER_Z},
+    {PAD_NATIVE_BUTTON_INVALID, PAD_TRIGGER_L},
+    {PAD_NATIVE_BUTTON_INVALID, PAD_TRIGGER_R},
+    {SDL_GAMEPAD_BUTTON_DPAD_UP, PAD_BUTTON_UP},
+    {SDL_GAMEPAD_BUTTON_DPAD_DOWN, PAD_BUTTON_DOWN},
+    {SDL_GAMEPAD_BUTTON_DPAD_LEFT, PAD_BUTTON_LEFT},
+    {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, PAD_BUTTON_RIGHT},
+}};
+
+// SDL's hidapi driver names the pad "Nintendo Wii U Pro Controller"; the Linux kernel driver's
+// "Nintendo Wii Remote Pro Controller" is only recognised by its USB id.
+static bool is_wii_u_pro(const aurora::gamepad::GameController& controller) {
+  const char* name = SDL_GetGamepadName(controller.m_controller);
+  const bool wiiUProId = SDL_GetGamepadVendor(controller.m_controller) == 0x057e &&
+                         SDL_GetGamepadProduct(controller.m_controller) == 0x0330;
+  return wiiUProId || (name != nullptr && SDL_strstr(name, "Wii U Pro Controller") != nullptr);
 }
 
 const std::array<PADButtonMapping, PAD_BUTTON_COUNT>&
 aurora::pad::detail::default_buttons(const gamepad::GameController& controller) {
+  if (is_wii_u_pro(controller)) {
+    return g_defaultButtonsWiiUPro;
+  }
   switch (SDL_GetGamepadType(controller.m_controller)) {
   case SDL_GAMEPAD_TYPE_XBOX360:
     return g_defaultButtonsXBox360;
@@ -494,13 +528,34 @@ const std::array<PADAxisMapping, PAD_AXIS_COUNT>& aurora::pad::detail::default_a
 
 const PADKeyboardState& aurora::pad::detail::keyboard_state(uint32_t port) { return g_keyboardBindings[port]; }
 
+// Secondary bindings live only in memory; the runtime re-applies them after every (re)load,
+// so any mapping reset also clears them.
+static void reset_alt_button_mapping(aurora::gamepad::GameController* controller) {
+  for (size_t i = 0; i < PAD_BUTTON_COUNT; ++i) {
+    controller->m_altButtonMapping[i] = {PAD_NATIVE_BUTTON_INVALID, controller->m_buttonMapping[i].padButton};
+  }
+}
+
 void __PADSetDefaultMapping(aurora::gamepad::GameController* controller) /*  NOLINT(*-reserved-identifier) */
 {
   controller->m_buttonMapping = aurora::pad::detail::default_buttons(*controller);
+  reset_alt_button_mapping(controller);
+}
+
+static bool is_valid_native_axis(const PADSignedNativeAxis axis) {
+  return axis.nativeAxis == -1 ||
+         (axis.nativeAxis >= 0 && axis.nativeAxis < SDL_GAMEPAD_AXIS_COUNT &&
+          (axis.sign == AXIS_SIGN_POSITIVE || axis.sign == AXIS_SIGN_NEGATIVE));
+}
+
+static bool dead_zones_valid(const PADDeadZones& deadZones) {
+  return deadZones.stickDeadZone <= SDL_JOYSTICK_AXIS_MAX && deadZones.substickDeadZone <= SDL_JOYSTICK_AXIS_MAX &&
+         deadZones.leftTriggerActivationZone <= SDL_JOYSTICK_AXIS_MAX &&
+         deadZones.rightTriggerActivationZone <= SDL_JOYSTICK_AXIS_MAX;
 }
 
 void __PADLoadMapping(aurora::gamepad::GameController* controller) /*  NOLINT(*-reserved-identifier) */ {
-  int32_t playerIndex = SDL_GetGamepadPlayerIndex(controller->m_controller);
+  int32_t playerIndex = aurora::gamepad::player_index(SDL_GetGamepadID(controller->m_controller));
   if (playerIndex < 0 || aurora::g_config.userPath == nullptr) {
     return;
   }
@@ -575,7 +630,11 @@ void __PADLoadMapping(aurora::gamepad::GameController* controller) /*  NOLINT(*-
     Log.warn("Unable to read controller bindings! Path: \"{}\"", aurora::io::fs_path_to_string(path));
     return;
   }
-  controller->m_deadZones = deadZones;
+  if (dead_zones_valid(deadZones)) {
+    controller->m_deadZones = deadZones;
+  } else {
+    Log.warn("__PADLoadMapping port={}: invalid deadzone data in file, keeping defaults", playerIndex);
+  }
   controller->m_buttonMapping = buttonMapping;
   controller->m_axisMapping = axisMapping;
   controller->m_rumbleIntensityLow = rumbleIntensityLow;
@@ -584,7 +643,8 @@ void __PADLoadMapping(aurora::gamepad::GameController* controller) /*  NOLINT(*-
 
   bool axisCorrupt = false;
   for (uint32_t i = 0; i < PAD_AXIS_COUNT; ++i) {
-    if (controller->m_axisMapping[i].padAxis != static_cast<PADAxis>(i)) {
+    if (controller->m_axisMapping[i].padAxis != static_cast<PADAxis>(i) ||
+        !is_valid_native_axis(controller->m_axisMapping[i].nativeAxis)) {
       axisCorrupt = true;
       break;
     }
@@ -605,6 +665,7 @@ void __PADLoadMapping(aurora::gamepad::GameController* controller) /*  NOLINT(*-
     Log.warn("__PADLoadMapping port={}: corrupt button data in file, resetting buttons to defaults", playerIndex);
     __PADSetDefaultMapping(controller);
   }
+  reset_alt_button_mapping(controller);
 }
 
 static void EnsureMappingLoaded(aurora::gamepad::GameController* controller) {
@@ -707,7 +768,7 @@ void PADControlMotor(const u32 chan, const u32 cmd) {
   const auto instance = aurora::gamepad::get_instance_for_player(chan);
   if (controller->m_isGameCube) {
     if (cmd == PAD_MOTOR_STOP) {
-      aurora::gamepad::controller_rumble(instance, 0, 1, 0);
+      aurora::gamepad::controller_rumble(instance, 0, 0, 0);
     } else if (cmd == PAD_MOTOR_RUMBLE) {
       aurora::gamepad::controller_rumble(instance, 1, 1, 0);
     } else if (cmd == PAD_MOTOR_STOP_HARD) {
@@ -888,6 +949,30 @@ void PADSetButtonMapping(const u32 port, const PADButtonMapping mapping) {
   }
 
   *iter = mapping;
+}
+
+void PADSetAltButtonMapping(const u32 port, const PADButtonMapping mapping) {
+  auto* controller = aurora::gamepad::get_controller_for_player(port);
+  if (controller == nullptr) {
+    return;
+  }
+  EnsureMappingLoaded(controller);
+  const auto iter = std::ranges::find_if(controller->m_altButtonMapping,
+                                         [mapping](const auto& pair) { return mapping.padButton == pair.padButton; });
+  if (iter != controller->m_altButtonMapping.end()) {
+    *iter = mapping;
+  }
+}
+
+PADButtonMapping* PADGetAltButtonMappings(const u32 port, u32* buttonCount) {
+  auto* controller = aurora::gamepad::get_controller_for_player(port);
+  if (controller == nullptr) {
+    *buttonCount = 0;
+    return nullptr;
+  }
+  EnsureMappingLoaded(controller);
+  *buttonCount = PAD_BUTTON_COUNT;
+  return controller->m_altButtonMapping.data();
 }
 
 void PADSetAllButtonMappings(const u32 port, const PADButtonMapping buttons[PAD_BUTTON_COUNT]) {

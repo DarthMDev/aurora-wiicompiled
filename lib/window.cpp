@@ -418,11 +418,13 @@ void process_event(SDL_Event& event) {
   }
   case SDL_EVENT_GAMEPAD_REMAPPED:
     input::sdl::gamepad_remapped(event.gdevice.which);
-    // A remap can change the controller's name and type; consumers re-read it like a new controller.
-    g_events.push_back(AuroraEvent{
-        .type = AURORA_CONTROLLER_ADDED,
-        .controller = event.gdevice.which,
-    });
+    // The default PAD table depends on the gamepad type, which a new mapping can change.
+    if (gamepad::refresh_controller(event.gdevice.which)) {
+      g_events.push_back(AuroraEvent{
+          .type = AURORA_CONTROLLER_ADDED,
+          .controller = event.gdevice.which,
+      });
+    }
     break;
   case SDL_EVENT_MOUSE_WHEEL:
     if (primaryWindow) {

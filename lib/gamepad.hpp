@@ -27,11 +27,19 @@ struct GameController {
   uint16_t m_vid = 0;
   uint16_t m_pid = 0;
   std::array<PADButtonMapping, PAD_BUTTON_COUNT> m_buttonMapping{};
+  std::array<PADButtonMapping, PAD_BUTTON_COUNT> m_altButtonMapping{};
   std::array<PADAxisMapping, PAD_AXIS_COUNT> m_axisMapping{};
   uint16_t m_rumbleIntensityLow = 32767;
   uint16_t m_rumbleIntensityHigh = 32767;
   bool m_forceDeviceRumble = false;
   bool m_mappingLoaded = false;
+  // SDL forgets the player index of devices mapped after connect; this keeps the assigned port.
+  Sint32 m_playerIndex = -1;
+  // Stable identity for telling identical controllers apart across launches.
+  std::string m_path;
+  int32_t m_slot = -1;
+  // GC Pocket+ keeps vibrating after a hard stop; it needs an ordinary stop instead.
+  bool m_gameCubeUseOrdinaryStop = false;
   constexpr bool operator==(const GameController& other) const {
     return m_controller == other.m_controller && m_index == other.m_index;
   }
@@ -45,6 +53,8 @@ struct GameController {
 GameController* get_controller_for_player(uint32_t player) noexcept;
 Sint32 get_instance_for_player(uint32_t player) noexcept;
 SDL_JoystickID add_controller(SDL_JoystickID which) noexcept;
+// Re-reads a controller whose SDL mapping changed. Returns false for unknown controllers.
+bool refresh_controller(SDL_JoystickID instance) noexcept;
 void remove_controller(Uint32 instance) noexcept;
 Sint32 player_index(Uint32 instance) noexcept;
 void set_player_index(Uint32 instance, Sint32 index) noexcept;

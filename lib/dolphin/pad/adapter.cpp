@@ -159,8 +159,11 @@ struct PortInputs {
   SourceId controller = kInvalidSourceId;
   bool keyboardActive = false;
   std::array<PADButtonMapping, PAD_BUTTON_COUNT> buttons{};
+  std::array<PADButtonMapping, PAD_BUTTON_COUNT> altButtons{};
   std::array<PADAxisMapping, PAD_AXIS_COUNT> axes{};
   PADDeadZones deadZones{};
+  // GameCube pads keep independent analog trigger travel next to their digital end-stop clicks.
+  bool nativeTriggers = false;
   std::array<PADKeyButtonBinding, PAD_BUTTON_COUNT> keys{};
   std::array<PADKeyAxisBinding, PAD_AXIS_COUNT> keyAxes{};
   uint64_t actionGeneration = 0;
@@ -169,15 +172,19 @@ struct PortInputs {
 
   static PortInputs for_port(u32 port, uint64_t actionGeneration) {
     PortInputs inputs{.actionGeneration = actionGeneration};
-    if (auto* controller = gamepad::get_controller_for_player(port)) {
+    const auto& keyboard = detail::keyboard_state(port);
+    inputs.keyboardActive = keyboard.m_mappingsSet;
+    // A port in keyboard mode ignores its controller.
+    auto* controller = inputs.keyboardActive ? nullptr : gamepad::get_controller_for_player(port);
+    if (controller != nullptr) {
       detail::ensure_mapping_loaded(controller);
       inputs.controller = input::source_for_gamepad(gamepad::get_instance_for_player(port));
       inputs.buttons = controller->m_buttonMapping;
+      inputs.altButtons = controller->m_altButtonMapping;
       inputs.axes = controller->m_axisMapping;
       inputs.deadZones = controller->m_deadZones;
+      inputs.nativeTriggers = has_native_triggers(*controller);
     }
-    const auto& keyboard = detail::keyboard_state(port);
-    inputs.keyboardActive = keyboard.m_mappingsSet;
     if (inputs.keyboardActive) {
       inputs.keys = keyboard.m_buttonMapping;
       inputs.keyAxes = keyboard.m_axisMapping;
@@ -187,8 +194,10 @@ struct PortInputs {
 
   static PortInputs for_controller(const gamepad::GameController& controller, SourceId source) {
     PortInputs inputs{.controller = source, .deadZones = controller.m_deadZones};
+    inputs.nativeTriggers = has_native_triggers(controller);
     if (controller.m_mappingLoaded) {
       inputs.buttons = controller.m_buttonMapping;
+      inputs.altButtons = controller.m_altButtonMapping;
       inputs.axes = controller.m_axisMapping;
     } else {
       inputs.buttons = detail::default_buttons(controller);
@@ -230,26 +239,68 @@ struct PortInputs {
     return set;
   }
 
+  [[nodiscard]] bool trigger_bound(PADButton trigger) const {
+    if (controller == kInvalidSourceId) {
+      return false;
+    }
+    const auto bound = [&](const PADButtonMapping& mapping) {
+      return mapping.padButton == trigger && mapping.nativeButton != PAD_NATIVE_BUTTON_INVALID;
+    };
+    return std::ranges::any_of(buttons, bound) || std::ranges::any_of(altButtons, bound);
+  }
+
 private:
+  static bool has_native_triggers(const gamepad::GameController& controller) {
+    return controller.m_isGameCube ||
+           (controller.m_controller != nullptr &&
+            SDL_GetGamepadType(controller.m_controller) == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO &&
+            controller.m_pid == 0x2073);
+  }
+
+  // A native button or an encoded axis direction, with its press threshold.
+  [[nodiscard]] std::optional<std::pair<PhysicalInput, float>> native_button_input(u32 nativeButton) const {
+    if (PADIsAxisButton(nativeButton)) {
+      const u32 axis = PADAxisButtonAxis(nativeButton);
+      const u32 threshold = PADAxisButtonThreshold(nativeButton);
+      if (axis >= SDL_GAMEPAD_AXIS_COUNT || threshold < 1 || threshold > 100) {
+        return std::nullopt;
+      }
+      using Direction = PhysicalInput::GamepadAxis::Direction;
+      return std::pair{
+          PhysicalInput{
+              .source = controller,
+              .control =
+                  PhysicalInput::GamepadAxis{
+                      .axis = static_cast<SDL_GamepadAxis>(axis),
+                      .direction = PADAxisButtonNegative(nativeButton) ? Direction::Negative : Direction::Positive,
+                  },
+          },
+          static_cast<float>(threshold) / 100.f,
+      };
+    }
+    if (nativeButton < SDL_GAMEPAD_BUTTON_COUNT) {
+      return std::pair{
+          PhysicalInput{
+              .source = controller,
+              .control = PhysicalInput::GamepadButton{static_cast<SDL_GamepadButton>(nativeButton)},
+          },
+          0.5f,
+      };
+    }
+    return std::nullopt;
+  }
+
   void add_controller_bindings(std::vector<Binding>& out) const {
     const auto& c = controls();
-    bool leftTriggerSet = false;
-    bool rightTriggerSet = false;
-    for (const auto& mapping : buttons) {
-      const ControlId target = control_for_button(mapping.padButton);
-      if (target == kInvalidControlId || mapping.nativeButton >= SDL_GAMEPAD_BUTTON_COUNT) {
-        continue;
+    const bool leftTriggerSet = trigger_bound(PAD_TRIGGER_L);
+    const bool rightTriggerSet = trigger_bound(PAD_TRIGGER_R);
+    for (const auto* table : {&buttons, &altButtons}) {
+      for (const auto& mapping : *table) {
+        const ControlId target = control_for_button(mapping.padButton);
+        if (const auto input = native_button_input(mapping.nativeButton); target != kInvalidControlId && input) {
+          out.push_back({.input = input->first, .target = target, .threshold = input->second});
+        }
       }
-      out.push_back({
-          .input =
-              {
-                  .source = controller,
-                  .control = PhysicalInput::GamepadButton{static_cast<SDL_GamepadButton>(mapping.nativeButton)},
-              },
-          .target = target,
-      });
-      leftTriggerSet = leftTriggerSet || mapping.padButton == PAD_TRIGGER_L;
-      rightTriggerSet = rightTriggerSet || mapping.padButton == PAD_TRIGGER_R;
     }
 
     const float stickDeadZone = deadZones.useDeadzones ? deadZones.stickDeadZone / 32767.f : 0.f;
@@ -258,6 +309,12 @@ private:
       const auto target = axis_target(mapping.padAxis, stickDeadZone, substickDeadZone);
       const auto input = controller_input(mapping, controller);
       if (target.control == kInvalidControlId || !input) {
+        continue;
+      }
+      // A button bound to L/R drives the analog value instead, so the original trigger axis
+      // cannot still press L/R after it was rebound.
+      if (!nativeTriggers && ((mapping.padAxis == PAD_AXIS_TRIGGER_L && leftTriggerSet) ||
+                              (mapping.padAxis == PAD_AXIS_TRIGGER_R && rightTriggerSet))) {
         continue;
       }
       out.push_back({
@@ -410,12 +467,14 @@ struct PortState {
     status.triggerLeft = to_trigger(gameplay.value(c.triggerL));
     status.triggerRight = to_trigger(gameplay.value(c.triggerR));
 
-    // A digital L/R press reads as a full analog press.
-    if ((status.button & PAD_TRIGGER_L) != 0) {
-      status.triggerLeft = 180;
-    }
-    if ((status.button & PAD_TRIGGER_R) != 0) {
-      status.triggerRight = 180;
+    // A button bound to L/R on a pad without native trigger travel drives the analog value.
+    if (!inputs.nativeTriggers) {
+      if (inputs.trigger_bound(PAD_TRIGGER_L)) {
+        status.triggerLeft = (status.button & PAD_TRIGGER_L) != 0 ? 255 : 0;
+      }
+      if (inputs.trigger_bound(PAD_TRIGGER_R)) {
+        status.triggerRight = (status.button & PAD_TRIGGER_R) != 0 ? 255 : 0;
+      }
     }
   }
 };
