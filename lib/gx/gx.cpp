@@ -592,6 +592,15 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
         stage.texCoordId = GX_TEXCOORD0;
       }
     }
+    // Konstant selectors left over from earlier draws only matter when a pass reads KONST.
+    const auto& c = stage.colorPass;
+    if (c.a != GX_CC_KONST && c.b != GX_CC_KONST && c.c != GX_CC_KONST && c.d != GX_CC_KONST) {
+      stage.kcSel = GX_TEV_KCSEL_1;
+    }
+    const auto& a = stage.alphaPass;
+    if (a.a != GX_CA_KONST && a.b != GX_CA_KONST && a.c != GX_CA_KONST && a.d != GX_CA_KONST) {
+      stage.kaSel = GX_TEV_KASEL_1;
+    }
   }
   config.shaderConfig.tevStageCount = g_gxState.numTevStages;
   for (u8 i = 0; i < g_gxState.numIndStages; ++i) {
@@ -610,7 +619,11 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
     }
   }
   for (u8 i = 0; i < g_gxState.numTexGens; ++i) {
-    config.shaderConfig.tcgs[i] = g_gxState.tcgs[i];
+    auto& tcg = config.shaderConfig.tcgs[i];
+    tcg = g_gxState.tcgs[i];
+    if (tcg.type < GX_TG_BUMP0 || tcg.type > GX_TG_BUMP7) {
+      tcg.embossSrc = 0;
+    }
   }
   if (g_gxState.alphaCompare) {
     config.shaderConfig.alphaCompare = g_gxState.alphaCompare;
