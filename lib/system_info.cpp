@@ -67,7 +67,7 @@ static std::string wideStringToUtf8(std::wstring_view str) {
 std::string GetCpuModel() {
   // Registry lookup: no COM, and links with every Windows toolchain.
   HKEY key = nullptr;
-  if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"HARDWARE\DESCRIPTION\System\CentralProcessor\0", 0, KEY_QUERY_VALUE,
+  if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", 0, KEY_QUERY_VALUE,
                     &key) != ERROR_SUCCESS) {
     Log.error("Unable to open the processor registry key");
     return Unknown;
