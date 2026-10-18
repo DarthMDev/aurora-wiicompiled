@@ -2,6 +2,8 @@
 #include "__gx.h"
 
 #include "../../gfx/texture.hpp"
+#include "../../gfx/presentation.hpp"
+#include "../../gfx/readback/copy_layout.hpp"
 #include "../../gfx/recording.hpp"
 #include "../../window.hpp"
 #include "../../webgpu/gpu.hpp"
@@ -10,8 +12,46 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <unordered_map>
 
 namespace {
+constexpr u32 ProbeMaxBytes = 256;
+constexpr size_t MaxProbes = 32;
+
+u16 sTexCopyWidth = 0;
+u16 sTexCopyHeight = 0;
+GXTexFmt sTexCopyFmt = GX_TF_I8;
+std::unordered_map<void*, AuroraReadbackStream> sProbeStreams;
+
+// Probe-sized copies (e.g. a lens-flare depth test) are read back into guest RAM a few frames late.
+void read_back_probe(void* dest) {
+  const u32 size = aurora::gfx::readback::byte_size(sTexCopyFmt, sTexCopyWidth, sTexCopyHeight);
+  if (dest == nullptr || size == 0 || size > ProbeMaxBytes) {
+    return;
+  }
+  auto it = sProbeStreams.find(dest);
+  if (it == sProbeStreams.end()) {
+    if (sProbeStreams.size() >= MaxProbes) {
+      return;
+    }
+    const AuroraReadbackStream stream = AuroraReadbackCreateStream();
+    if (stream == 0) {
+      return;
+    }
+    it = sProbeStreams.emplace(dest, stream).first;
+    // Far Z until the first result arrives, so a depth probe reads as unobstructed.
+    std::memset(dest, 0xFF, size);
+    aurora::gfx::presentation::notify_guest_write(dest, size);
+  }
+  AuroraReadbackDest result{.key = 0, .dest = dest, .size = size};
+  if (AuroraReadbackGet(it->second, &result, 1)) {
+    aurora::gfx::presentation::notify_guest_write(dest, size);
+  }
+  const AuroraReadbackCopySrc src{.key = 0, .src = dest};
+  AuroraReadbackCaptureCopies(it->second, &src, 1);
+}
+
 aurora::Vec2<uint32_t> scale_copy_dst(u32 logicalWidth, u32 logicalHeight) {
   if (g_gxState.viewportPolicy == AURORA_VIEWPORT_NATIVE) {
     return {logicalWidth, logicalHeight};
@@ -248,6 +288,9 @@ void GXSetDispCopyDst(u16 wd, u16 ht) {
 }
 
 void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
+  sTexCopyWidth = wd;
+  sTexCopyHeight = ht;
+  sTexCopyFmt = fmt;
   GX_WRITE_AURORA(GX_AURORA_LOAD_COPY_DST);
   GX_WRITE_U32(wd);
   GX_WRITE_U32(ht);
@@ -343,6 +386,7 @@ void GXCopyTex(void* dest, GXBool clear) {
   SET_REG_FIELD(0, __gx->cpTex, 1, 14, 0);
   SET_REG_FIELD(0, __gx->cpTex, 8, 24, 0x52);
   GX_WRITE_RAS_REG(__gx->cpTex);
+  read_back_probe(dest);
   aurora::gx::fifo::publish();
 }
 
