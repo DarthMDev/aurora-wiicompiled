@@ -401,178 +401,209 @@ void end_frame() noexcept {
   }
 #endif
 
+  const auto schedule = gfx::presentation::present_schedule();
   const bool black = video::is_black();
   const float brightness = video::brightness();
   gfx::end_frame([black, brightness, rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport, presentSource,
-                  displayCopy = std::move(displayCopy),
+                  displayCopy = std::move(displayCopy), schedule,
                   imguiDrawData = std::move(imguiDrawData)](
-                     wgpu::CommandEncoder& encoder, std::vector<gfx::AfterSubmitCallback> afterSubmitCallbacks) {
-    const auto presentMode = webgpu::g_graphicsConfig.surfaceConfiguration.presentMode;
+                     wgpu::CommandEncoder& encoder, std::vector<gfx::AfterSubmitCallback> afterSubmitCallbacks,
+                     const gfx::InterpolationReplay& replay) {
+    const auto present = [&](wgpu::CommandEncoder& encoder, bool finalPresent) {
+      const auto presentMode = webgpu::g_graphicsConfig.surfaceConfiguration.presentMode;
 
-    if (presentMode == wgpu::PresentMode::Fifo || presentMode == wgpu::PresentMode::FifoRelaxed) {
-      const wgpu::CommandBufferDescriptor sceneDescriptor{.label = "Scene command buffer"};
-      const auto sceneCommands = encoder.Finish(&sceneDescriptor);
-      g_queue.Submit(1, &sceneCommands);
+      if (presentMode == wgpu::PresentMode::Fifo || presentMode == wgpu::PresentMode::FifoRelaxed) {
+        const wgpu::CommandBufferDescriptor sceneDescriptor{.label = "Scene command buffer"};
+        const auto sceneCommands = encoder.Finish(&sceneDescriptor);
+        g_queue.Submit(1, &sceneCommands);
 
-      const wgpu::CommandEncoderDescriptor presentDescriptor{.label = "Present encoder"};
-      encoder = g_device.CreateCommandEncoder(&presentDescriptor);
-    }
-
-    wgpu::Texture currentTexture;
-    wgpu::TextureView currentView;
-    auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
-    {
-      window::SurfaceLock surfaceLock;
-
-      if (window::is_presentable() && g_surface) {
-        ZoneScopedN("Acquire texture");
-        wgpu::SurfaceTexture surfaceTexture;
-        g_surface.GetCurrentTexture(&surfaceTexture);
-        surfaceStatus = surfaceTexture.status;
-
-        if (surfaceStatus == wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal) {
-          currentTexture = std::move(surfaceTexture.texture);
-          currentView = currentTexture.CreateView();
-        }
-      }
-    }
-
-    const bool canPresent = currentTexture && currentView;
-
-    if (canPresent) {
-      wgpu::BindGroup presentBindGroup;
-
-      if (rmlBindGroup && !rmlOverlay) {
-        presentBindGroup = rmlBindGroup;
-      } else {
-        const auto& resampledSource = webgpu::resample_present_source(encoder, viewport, presentSource);
-        presentBindGroup = webgpu::create_copy_bind_group(resampledSource);
+        const wgpu::CommandEncoderDescriptor presentDescriptor{.label = "Present encoder"};
+        encoder = g_device.CreateCommandEncoder(&presentDescriptor);
       }
 
-      {
-        const std::array attachments{
-            wgpu::RenderPassColorAttachment{
-                .view = currentView,
-                .loadOp = wgpu::LoadOp::Clear,
-                .storeOp = wgpu::StoreOp::Store,
-            },
-        };
-
-        const wgpu::RenderPassDescriptor renderPassDescriptor{
-            .label = "EFB copy render pass",
-            .colorAttachmentCount = attachments.size(),
-            .colorAttachments = attachments.data(),
-            .timestampWrites = webgpu::gpu_prof::pass_writes("Present blit"),
-        };
-
-        const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
-        // Copy EFB -> XFB (swapchain)
-        if (brightness < 1.0f) {
-          pass.SetPipeline(webgpu::g_CopyDimmedPipeline);
-          const wgpu::Color blend{brightness, brightness, brightness, 1.0};
-          pass.SetBlendConstant(&blend);
-        } else {
-          pass.SetPipeline(webgpu::g_CopyPipeline);
-        }
-
-        pass.SetBindGroup(0, presentBindGroup, 0, nullptr);
-        set_present_viewport(pass, viewport, webgpu::g_graphicsConfig.surfaceConfiguration.width,
-                             webgpu::g_graphicsConfig.surfaceConfiguration.height);
-
-        if (!black) {
-          pass.Draw(3);
-        }
-
-        if (rmlBindGroup && rmlOverlay) {
-          pass.SetPipeline(webgpu::g_CopyPremultipliedAlphaPipeline);
-          pass.SetBindGroup(0, rmlBindGroup, 0, nullptr);
-          pass.Draw(3);
-        }
-
-        pass.End();
-      }
-
-      {
-        const std::array attachments{
-            wgpu::RenderPassColorAttachment{
-                .view = currentView,
-                .loadOp = wgpu::LoadOp::Load,
-                .storeOp = wgpu::StoreOp::Store,
-            },
-        };
-
-        const wgpu::RenderPassDescriptor renderPassDescriptor{
-            .label = "ImGui render pass",
-            .colorAttachmentCount = attachments.size(),
-            .colorAttachments = attachments.data(),
-            .timestampWrites = webgpu::gpu_prof::pass_writes("ImGui"),
-        };
-
-        const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
-        pass.SetViewport(0.f, 0.f, static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.width),
-                         static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.height), 0.f, 1.f);
-        imgui::render(pass, imguiDrawData);
-        pass.End();
-      }
-    } else {
-      Log.info("Skipping present; window not presentable");
-    }
-
-    webgpu::gpu_prof::frame_end(encoder);
-    const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Redraw command buffer"};
-    const auto buffer = encoder.Finish(&cmdBufDescriptor);
-    {
-      ZoneScopedN("Queue Submit");
-      g_queue.Submit(1, &buffer);
-    }
-
-    webgpu::gpu_prof::after_submit();
-    if (canPresent && g_surface) {
-      ZoneScopedN("Present");
-      wgpu::ConvertibleStatus status = wgpu::Status::Error;
+      wgpu::Texture currentTexture;
+      wgpu::TextureView currentView;
+      auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
       {
         window::SurfaceLock surfaceLock;
 
-        if (window::is_presentable()) {
-          status = g_surface.Present();
+        if (window::is_presentable() && g_surface) {
+          ZoneScopedN("Acquire texture");
+          wgpu::SurfaceTexture surfaceTexture;
+          g_surface.GetCurrentTexture(&surfaceTexture);
+          surfaceStatus = surfaceTexture.status;
+
+          if (surfaceStatus == wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal) {
+            currentTexture = std::move(surfaceTexture.texture);
+            currentView = currentTexture.CreateView();
+          }
         }
       }
 
-      if (status) {
-        gfx::after_present();
-        gfx::presentation::record_present(false);
-      } else {
-        Log.warn("Surface present failed");
-        webgpu::release_surface();
-      }
-    } else if (g_surface) {
-      switch (surfaceStatus) {
-      case wgpu::SurfaceGetCurrentTextureStatus::Timeout:
-        Log.warn("Surface texture acquisition timed out");
-        break;
-      case wgpu::SurfaceGetCurrentTextureStatus::SuccessSuboptimal:
-      case wgpu::SurfaceGetCurrentTextureStatus::Outdated:
-        Log.info("Surface texture is {}, reconfiguring swapchain", magic_enum::enum_name(surfaceStatus));
-        window::push_custom_event(window::CustomEvent::RefreshSurface);
-        break;
-      case wgpu::SurfaceGetCurrentTextureStatus::Lost:
-        Log.warn("Surface texture is {}, releasing surface", magic_enum::enum_name(surfaceStatus));
-        webgpu::release_surface();
-        break;
-      case wgpu::SurfaceGetCurrentTextureStatus::Error:
-        Log.warn("Surface texture is {}, dropping surface", magic_enum::enum_name(surfaceStatus));
-        g_surface = {};
-        break;
-      default:
-        if (!window::is_presentable()) {
-          webgpu::release_surface();
+      const bool canPresent = currentTexture && currentView;
+
+      if (canPresent) {
+        wgpu::BindGroup presentBindGroup;
+
+        if (rmlBindGroup && !rmlOverlay) {
+          presentBindGroup = rmlBindGroup;
         } else {
-          Log.error("Failed to get surface texture: {}", magic_enum::enum_name(surfaceStatus));
+          const auto& resampledSource = webgpu::resample_present_source(encoder, viewport, presentSource);
+          presentBindGroup = webgpu::create_copy_bind_group(resampledSource);
         }
 
-        break;
+        {
+          const std::array attachments{
+              wgpu::RenderPassColorAttachment{
+                  .view = currentView,
+                  .loadOp = wgpu::LoadOp::Clear,
+                  .storeOp = wgpu::StoreOp::Store,
+              },
+          };
+
+          const wgpu::RenderPassDescriptor renderPassDescriptor{
+              .label = "EFB copy render pass",
+              .colorAttachmentCount = attachments.size(),
+              .colorAttachments = attachments.data(),
+              .timestampWrites = webgpu::gpu_prof::pass_writes("Present blit"),
+          };
+
+          const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
+          // Copy EFB -> XFB (swapchain)
+          if (brightness < 1.0f) {
+            pass.SetPipeline(webgpu::g_CopyDimmedPipeline);
+            const wgpu::Color blend{brightness, brightness, brightness, 1.0};
+            pass.SetBlendConstant(&blend);
+          } else {
+            pass.SetPipeline(webgpu::g_CopyPipeline);
+          }
+
+          pass.SetBindGroup(0, presentBindGroup, 0, nullptr);
+          set_present_viewport(pass, viewport, webgpu::g_graphicsConfig.surfaceConfiguration.width,
+                               webgpu::g_graphicsConfig.surfaceConfiguration.height);
+
+          if (!black) {
+            pass.Draw(3);
+          }
+
+          if (rmlBindGroup && rmlOverlay) {
+            pass.SetPipeline(webgpu::g_CopyPremultipliedAlphaPipeline);
+            pass.SetBindGroup(0, rmlBindGroup, 0, nullptr);
+            pass.Draw(3);
+          }
+
+          pass.End();
+        }
+
+        {
+          const std::array attachments{
+              wgpu::RenderPassColorAttachment{
+                  .view = currentView,
+                  .loadOp = wgpu::LoadOp::Load,
+                  .storeOp = wgpu::StoreOp::Store,
+              },
+          };
+
+          const wgpu::RenderPassDescriptor renderPassDescriptor{
+              .label = "ImGui render pass",
+              .colorAttachmentCount = attachments.size(),
+              .colorAttachments = attachments.data(),
+              .timestampWrites = webgpu::gpu_prof::pass_writes("ImGui"),
+          };
+
+          const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
+          pass.SetViewport(0.f, 0.f, static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.width),
+                           static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.height), 0.f, 1.f);
+          imgui::render(pass, imguiDrawData);
+          pass.End();
+        }
+      } else {
+        Log.info("Skipping present; window not presentable");
       }
+
+      if (finalPresent) {
+        webgpu::gpu_prof::frame_end(encoder);
+      }
+      const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Redraw command buffer"};
+      const auto buffer = encoder.Finish(&cmdBufDescriptor);
+      {
+        ZoneScopedN("Queue Submit");
+        g_queue.Submit(1, &buffer);
+      }
+
+      if (finalPresent) {
+        webgpu::gpu_prof::after_submit();
+      }
+      if (canPresent && g_surface) {
+        ZoneScopedN("Present");
+        wgpu::ConvertibleStatus status = wgpu::Status::Error;
+        {
+          window::SurfaceLock surfaceLock;
+
+          if (window::is_presentable()) {
+            status = g_surface.Present();
+          }
+        }
+
+        if (status) {
+          gfx::after_present();
+          gfx::presentation::record_present(false);
+        } else {
+          Log.warn("Surface present failed");
+          webgpu::release_surface();
+        }
+      } else if (g_surface) {
+        switch (surfaceStatus) {
+        case wgpu::SurfaceGetCurrentTextureStatus::Timeout:
+          Log.warn("Surface texture acquisition timed out");
+          break;
+        case wgpu::SurfaceGetCurrentTextureStatus::SuccessSuboptimal:
+        case wgpu::SurfaceGetCurrentTextureStatus::Outdated:
+          Log.info("Surface texture is {}, reconfiguring swapchain", magic_enum::enum_name(surfaceStatus));
+          window::push_custom_event(window::CustomEvent::RefreshSurface);
+          break;
+        case wgpu::SurfaceGetCurrentTextureStatus::Lost:
+          Log.warn("Surface texture is {}, releasing surface", magic_enum::enum_name(surfaceStatus));
+          webgpu::release_surface();
+          break;
+        case wgpu::SurfaceGetCurrentTextureStatus::Error:
+          Log.warn("Surface texture is {}, dropping surface", magic_enum::enum_name(surfaceStatus));
+          g_surface = {};
+          break;
+        default:
+          if (!window::is_presentable()) {
+            webgpu::release_surface();
+          } else {
+            Log.error("Failed to get surface texture: {}", magic_enum::enum_name(surfaceStatus));
+          }
+
+          break;
+        }
+      }
+    };
+
+    // Interpolated slots replay the frame with blended transforms and present between frames:
+    // slot k of N+1 goes out at base + k * interval / (N + 1), the native frame last.
+    const uint32_t groupSize = replay.slots + 1;
+    const auto deadline = [&](uint32_t slot) -> uint64_t {
+      return replay.slots != 0 && schedule.baseNanos != 0 && schedule.intervalNanos != 0
+                 ? schedule.baseNanos + schedule.intervalNanos * slot / groupSize
+                 : 0;
+    };
+    for (uint32_t slot = 0; slot < replay.slots; ++slot) {
+      // A slot that would only show after the next one is due adds latency without motion.
+      if (const uint64_t next = deadline(slot + 1); next != 0 && gfx::presentation::now_nanos() >= next) {
+        continue;
+      }
+      const wgpu::CommandEncoderDescriptor slotDescriptor{.label = "Interpolated frame encoder"};
+      auto slotEncoder = g_device.CreateCommandEncoder(&slotDescriptor);
+      replay.encode(slotEncoder, slot);
+      gfx::presentation::wait_until(deadline(slot));
+      present(slotEncoder, false);
     }
+    gfx::presentation::wait_until(deadline(replay.slots));
+    present(encoder, true);
+
     for (auto& callback : afterSubmitCallbacks) {
       if (callback) {
         callback();

@@ -37,5 +37,11 @@ using webgpu::Viewport;
 struct TextureRef;
 using TextureHandle = std::shared_ptr<TextureRef>;
 using AfterSubmitCallback = std::function<void()>;
-using EndFrameCallback = std::function<void(wgpu::CommandEncoder&, std::vector<AfterSubmitCallback>)>;
+// Re-encodes the frame for interpolated presentation slot `slot` into `cmd`.
+struct InterpolationReplay {
+  uint32_t slots = 0;
+  std::function<void(wgpu::CommandEncoder& cmd, uint32_t slot)> encode;
+};
+using EndFrameCallback =
+    std::function<void(wgpu::CommandEncoder&, std::vector<AfterSubmitCallback>, const InterpolationReplay&)>;
 } // namespace aurora::gfx

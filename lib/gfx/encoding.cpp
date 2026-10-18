@@ -405,6 +405,50 @@ void copy_staging_to_high_water(wgpu::CommandEncoder& cmd, FramePacket& frame, c
 } // namespace
 
 namespace detail {
+// Copies everything the frame staged into the device buffers, independent of what the
+// incrementally encoded native frame has copied so far.
+void encode_full_staging_copy(wgpu::CommandEncoder& cmd, FramePacket& frame) {
+  if (frame.ops.empty()) {
+    return;
+  }
+  FrameOp op = frame.ops.back();
+  op.highWater = {
+      .verts = static_cast<uint32_t>(frame.verts.size()),
+      .uniforms = static_cast<uint32_t>(frame.uniforms.size()),
+      .indices = static_cast<uint32_t>(frame.indices.size()),
+      .storage = static_cast<uint32_t>(frame.storage.size()),
+      .textureUpload = static_cast<uint32_t>(frame.textureUpload.size()),
+      .textureUploadCount = frame.textureUploads.size(),
+  };
+  op.textureUploads.clear();
+  for (const auto& upload : frame.textureUploads) {
+    op.textureUploads.push_back(&upload);
+  }
+  auto copied = frame.copied;
+  frame.copied = {};
+  copy_staging_to_high_water(cmd, frame, op);
+  frame.copied = copied;
+}
+
+// Re-encodes an op for an interpolated slot: render passes and texture copies only, so
+// readbacks and guest-visible tasks run once, with the native frame.
+void encode_replay_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const FrameOp& op) {
+  switch (op.type) {
+  case FrameOpType::RenderPass:
+    if (op.renderPass != nullptr) {
+      render(cmd, frame, *op.renderPass, op.index);
+    }
+    break;
+  case FrameOpType::TextureCopy:
+    if (op.textureCopy != nullptr) {
+      cmd.CopyTextureToTexture(&op.textureCopy->src, &op.textureCopy->dst, &op.textureCopy->size);
+    }
+    break;
+  default:
+    break;
+  }
+}
+
 void encode_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const FrameOp& op) {
   copy_staging_to_high_water(cmd, frame, op);
   switch (op.type) {

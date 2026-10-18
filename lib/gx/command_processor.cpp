@@ -4,6 +4,7 @@
 #include "../internal.hpp"
 #include "dolphin/gd/GDGeometry.h"
 #include "dolphin/gx/GXAurora.h"
+#include "frame_interpolation.hpp"
 #include "gx.hpp"
 #include "pipeline.hpp"
 #include "readback.hpp"
@@ -144,8 +145,66 @@ struct DrawCache {
   FogRangeLutKey fogRangeKey{};
   bool hasFogRange = false;
   GXVtxFmt lastDrawFmt = GX_MAX_VTXFMT;
+  // Frame interpolation state of the cached uniform block.
+  uint32_t interpUniformBase = UINT32_MAX;
+  u32 interpCurrentMatrix = 0;
+  bool interpRecorded = false;
 };
 DrawCache sDrawCache;
+
+struct PnMtxUsage {
+  uint16_t mask = 0;
+  HashType topologySignature = 0;
+};
+
+// Position matrix slots a draw reads, and a hash of its per-vertex matrix-index stream.
+PnMtxUsage pn_mtx_usage(const uint8_t* vertices, uint16_t vtxCount, uint32_t vtxStride) noexcept {
+  if (g_gxState.vtxDesc[GX_VA_PNMTXIDX] != GX_DIRECT) {
+    return {.mask = static_cast<uint16_t>(1u << std::min<uint32_t>(g_gxState.currentPnMtx, MaxPnMtx - 1))};
+  }
+  Hasher topology;
+  topology.update(vtxCount);
+  uint16_t mask = 0;
+  for (uint16_t vertex = 0; vertex < vtxCount; ++vertex) {
+    // Matrix-index attributes come first in a vertex and are one byte each.
+    const uint8_t rawIndex = vertices[static_cast<size_t>(vertex) * vtxStride];
+    topology.update(rawIndex);
+    if (const uint32_t index = rawIndex / 3u; index < MaxPnMtx) {
+      mask |= static_cast<uint16_t>(1u << index);
+    }
+  }
+  return {.mask = mask, .topologySignature = static_cast<HashType>(topology.digest())};
+}
+
+// Mesh identity: vertex data without the matrix-index bytes, which only select palette slots,
+// plus the arrays indexed attributes read from.
+HashType draw_geometry_signature(const uint8_t* vertices, uint16_t vtxCount, uint32_t vtxStride) noexcept {
+  Hasher hasher;
+  hasher.update(vtxCount);
+  hasher.update(vtxStride);
+  uint32_t matrixPrefix = 0;
+  for (int i = GX_VA_PNMTXIDX; i < GX_VA_POS; ++i) {
+    matrixPrefix += g_gxState.vtxDesc[i] != GX_NONE ? 1 : 0;
+  }
+  matrixPrefix = std::min(matrixPrefix, vtxStride);
+  if (matrixPrefix == 0) {
+    hasher.update(vertices, static_cast<size_t>(vtxCount) * vtxStride);
+  } else {
+    for (uint16_t vertex = 0; vertex < vtxCount; ++vertex) {
+      hasher.update(vertices + static_cast<size_t>(vertex) * vtxStride + matrixPrefix, vtxStride - matrixPrefix);
+    }
+  }
+  for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
+    if (g_gxState.vtxDesc[i] != GX_INDEX8 && g_gxState.vtxDesc[i] != GX_INDEX16) {
+      continue;
+    }
+    const auto& array = g_gxState.arrays[i];
+    hasher.update(static_cast<uint32_t>(i));
+    hasher.update(reinterpret_cast<uintptr_t>(array.data));
+    hasher.update(array.stride);
+  }
+  return static_cast<HashType>(hasher.digest());
+}
 
 FogRangeLutKey fog_range_lut_key() noexcept {
   const auto& state = g_gxState.fog;
@@ -477,10 +536,66 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     }
   }
 
-  const bool uniformValid = (state.dirty & DirtyUniform) == 0 && cache.uniformRange.size != 0;
+  const bool interpolate = frame_interpolation_active() && state.projType == GX_PERSPECTIVE;
+  const bool indexedMatrices = state.vtxDesc[GX_VA_PNMTXIDX] != GX_NONE;
+  bool uniformValid = (state.dirty & DirtyUniform) == 0 && cache.uniformRange.size != 0;
+  // A block holds one interpolated live matrix, so each live matrix gets its own block.
+  if (interpolate && uniformValid && cache.interpRecorded && !indexedMatrices &&
+      cache.interpCurrentMatrix != state.currentPnMtx) {
+    uniformValid = false;
+  }
+  PnMtxUsage usage{};
+  const uint8_t* vertices = nullptr;
+  uint32_t vtxStride = 0;
+  if (interpolate && vtxCount != 0) {
+    vertices = gfx::vertex_data(vertRange);
+    vtxStride = vertRange.size / vtxCount;
+    usage = pn_mtx_usage(vertices, vtxCount, vtxStride);
+  }
   if (!uniformValid) {
     cache.uniformRange = build_uniform(cache.shaderInfo);
     state.dirty &= ~DirtyUniform;
+    cache.interpUniformBase = UINT32_MAX;
+    cache.interpRecorded = false;
+    if (interpolate && vertices != nullptr) {
+      const size_t projectionOffset = 16 + (cache.shaderInfo.lineMode != 0 ? 16 : 0);
+      const size_t positionOffset = projectionOffset + sizeof(Mat4x4<float>);
+      const size_t normalOffset = positionOffset + sizeof(Mat3x4<float>) * (MaxPnMtx + MaxTexMtx);
+      const uint8_t* uniformData = gfx::uniform_data(cache.uniformRange);
+      Mat4x4<float> projection;
+      std::memcpy(&projection, uniformData + projectionOffset, sizeof(projection));
+
+      const HashType drawShape = static_cast<HashType>(vtxCount) | (static_cast<HashType>(prim) << 16) |
+                                 (static_cast<HashType>(fmt) << 24);
+      const HashType pipelineSignature = xxh3_hash(cache.pipelineRef, drawShape);
+      const HashType textureSignature = xxh3_hash(cache.bindGroups.textureBindGroup);
+      const HashType material =
+          xxh3_hash(usage.topologySignature, xxh3_hash(cache.bindGroups.textureBindGroup, pipelineSignature));
+      const auto ranges = record_interpolation_draw(
+          FrameInterpolationDrawIdentity{
+              .combined = xxh3_hash(draw_geometry_signature(vertices, vtxCount, vtxStride), material),
+              .pipeline = pipelineSignature,
+              .texture = textureSignature,
+              .matrixTopology = usage.topologySignature,
+          },
+          projection, usage.mask,
+          InterpolatedUniformLayout{
+              .sourceUniformData = uniformData,
+              .uniformSize = cache.uniformRange.size,
+              .projectionOffset = projectionOffset,
+              .positionOffset = positionOffset,
+              .normalOffset = normalOffset,
+              .currentMatrix = std::min<size_t>(state.currentPnMtx, MaxPnMtx - 1),
+              .indexedMatrices = indexedMatrices,
+          });
+      if (ranges[0].size != 0) {
+        cache.interpUniformBase = ranges[0].offset;
+      }
+      cache.interpRecorded = true;
+      cache.interpCurrentMatrix = state.currentPnMtx;
+    }
+  } else if (interpolate && cache.interpRecorded && vertices != nullptr) {
+    extend_interpolation_draw(usage.mask);
   }
   if (cache.config.shaderConfig.fogRangeEnabled) {
     const auto key = fog_range_lut_key();
@@ -509,6 +624,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .vertRange = vertRange,
       .idxRange = idxRange,
       .uniformRange = cache.uniformRange,
+      .interpUniformBase = cache.interpUniformBase,
       .immediateData = immediates,
       .vtxCount = vtxCount,
       .indexCount = numIndices,
@@ -605,6 +721,9 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& 
     }
     lastDraw->vtxCount += vtxCount;
     lastDraw->indexCount += numIndices;
+    if (sDrawCache.interpRecorded && frame_interpolation_active() && vtxCount != 0) {
+      extend_interpolation_draw(pn_mtx_usage(vertexData.data(), vtxCount, vtxSize).mask);
+    }
     gfx::detail::increment_merged_draw_count();
     return;
   }

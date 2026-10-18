@@ -10,6 +10,8 @@ struct DrawData {
   gfx::Range vertRange;
   gfx::Range idxRange;
   gfx::Range uniformRange;
+  // First interpolated copy of the uniform block; slot k follows at k aligned block sizes.
+  uint32_t interpUniformBase = UINT32_MAX;
   DrawImmediateData immediateData;
   uint32_t vtxCount;
   uint32_t indexCount;

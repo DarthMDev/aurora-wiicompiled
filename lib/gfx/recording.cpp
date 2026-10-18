@@ -1275,6 +1275,21 @@ Range push_uniform(const uint8_t* data, size_t length) {
   return push(current_frame_packet().uniforms, data, length, resources().limits.minUniformBufferOffsetAlignment);
 }
 
+std::pair<std::span<uint8_t>, Range> map_uniform(size_t length) {
+  if (!check_recording("map_uniform")) {
+    return {};
+  }
+  auto& uniforms = current_frame_packet().uniforms;
+  const auto range = map(uniforms, length, resources().limits.minUniformBufferOffsetAlignment);
+  return {std::span{uniforms.data() + range.offset, range.size}, range};
+}
+
+const uint8_t* uniform_data(const Range& range) noexcept {
+  return current_frame_packet().uniforms.data() + range.offset;
+}
+
+const uint8_t* vertex_data(const Range& range) noexcept { return current_frame_packet().verts.data() + range.offset; }
+
 Range push_storage(const uint8_t* data, size_t length) {
   ZoneScoped;
   if (!check_recording("push_storage")) {

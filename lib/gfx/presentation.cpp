@@ -2,6 +2,7 @@
 
 #include "render_worker.hpp"
 #include "resources.hpp"
+#include "../gx/frame_interpolation.hpp"
 #include "../internal.hpp"
 
 #include <aurora/aurora.h>
@@ -14,7 +15,13 @@
 #include <cmath>
 #include <mutex>
 #include <optional>
+#include <thread>
 #include <vector>
+
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 namespace aurora::gfx::presentation {
 namespace {
@@ -115,6 +122,59 @@ Schedule present_schedule() noexcept {
 
 bool producer_paced() noexcept { return g_producerPaced.load(std::memory_order_acquire); }
 
+uint64_t now_nanos() noexcept {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(PresentClock::now().time_since_epoch()).count());
+}
+
+void wait_until(uint64_t deadlineNanos) noexcept {
+  if (deadlineNanos == 0) {
+    return;
+  }
+  const PresentClock::time_point deadline{std::chrono::nanoseconds{deadlineNanos}};
+  // Spin tail covering the waitable timer's wakeup jitter.
+  constexpr auto SpinWindow = std::chrono::microseconds(400);
+  auto now = PresentClock::now();
+  if (now >= deadline) {
+    return;
+  }
+  const auto timerDeadline = deadline - now > SpinWindow ? deadline - SpinWindow : deadline;
+#if defined(_WIN32)
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+  struct HighResolutionTimer {
+    HANDLE handle = ::CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                             TIMER_MODIFY_STATE | SYNCHRONIZE);
+    ~HighResolutionTimer() {
+      if (handle != nullptr) {
+        ::CloseHandle(handle);
+      }
+    }
+  };
+  static thread_local HighResolutionTimer timer;
+  if (timer.handle != nullptr && timerDeadline > now) {
+    const auto remaining = std::chrono::duration_cast<std::chrono::duration<int64_t, std::ratio<1, 10000000>>>(
+        timerDeadline - now);
+    LARGE_INTEGER due{};
+    due.QuadPart = -std::max<int64_t>(remaining.count(), 1);
+    if (::SetWaitableTimerEx(timer.handle, &due, 0, nullptr, nullptr, nullptr, 0) != FALSE) {
+      ::WaitForSingleObject(timer.handle, INFINITE);
+    }
+  } else
+#endif
+  {
+    std::this_thread::sleep_until(timerDeadline);
+  }
+  while (PresentClock::now() < deadline) {
+#if defined(_WIN32)
+    YieldProcessor();
+#else
+    std::this_thread::yield();
+#endif
+  }
+}
+
 uint64_t guest_write_generation(const void* hostPtr, size_t size) noexcept {
   const auto callback = g_guestWriteGeneration.load(std::memory_order_acquire);
   return callback != nullptr ? callback(hostPtr, size) : AURORA_GUEST_WRITE_UNTRACKED;
@@ -129,7 +189,6 @@ void notify_guest_write(const void* hostPtr, size_t size) noexcept {
 
 namespace {
 std::atomic_bool g_skipUnreadyPipelines = true;
-std::atomic_uint32_t g_frameInterpolationFps = 0;
 } // namespace
 
 void aurora_set_frame_worker_wait_callback(AuroraFrameWorkerWaitCallback callback) {
@@ -150,6 +209,7 @@ void aurora_set_present_schedule(uint64_t baseNanos, uint64_t intervalNanos) {
 
 void aurora_report_producer_paced(bool paced) {
   aurora::gfx::presentation::g_producerPaced.store(paced, std::memory_order_release);
+  aurora::gx::report_producer_paced(paced);
 }
 
 void aurora_get_present_timing(AuroraPresentTiming* timing) {
@@ -177,14 +237,12 @@ void aurora_set_guest_write_hooks(AuroraGuestWriteGenerationCallback generation,
   aurora::gfx::presentation::g_guestWriteNotify.store(notify, std::memory_order_release);
 }
 
-void aurora_set_frame_interpolation_fps(uint32_t targetFps) {
-  g_frameInterpolationFps.store(targetFps, std::memory_order_release);
-}
+void aurora_set_frame_interpolation_fps(uint32_t targetFps) { aurora::gx::set_frame_interpolation_fps(targetFps); }
 
-uint32_t aurora_get_frame_interpolation_fps() { return g_frameInterpolationFps.load(std::memory_order_acquire); }
+uint32_t aurora_get_frame_interpolation_fps() { return aurora::gx::frame_interpolation_fps(); }
 
 void aurora_get_frame_interpolation_diagnostics(AuroraFrameInterpolationDiagnostics* diagnostics) {
   if (diagnostics != nullptr) {
-    *diagnostics = {.targetFps = g_frameInterpolationFps.load(std::memory_order_acquire)};
+    aurora::gx::get_frame_interpolation_diagnostics(*diagnostics);
   }
 }

@@ -1,4 +1,6 @@
 #include <condition_variable>
+#include "../gx/frame_interpolation.hpp"
+#include "encoding.hpp"
 #include "frame.hpp"
 
 #include "pipeline_cache.hpp"
@@ -752,6 +754,7 @@ bool begin_frame() {
 
   begin_recording(frame, frameSlot);
   begin_pipeline_frame();
+  gx::begin_frame_interpolation();
   render_worker::enqueue_begin_frame(frame.frameId, [frameSlot] {
     constexpr wgpu::CommandEncoderDescriptor EncoderDescriptor{.label = "Redraw encoder"};
     g_framePackets[frameSlot].encoder = g_device.CreateCommandEncoder(&EncoderDescriptor);
@@ -777,16 +780,34 @@ void end_frame(EndFrameCallback callback) {
   const uint64_t frameId = frame.frameId;
   end_pipeline_frame();
   ++g_frameIndex;
+  // Interpolated copies are written into the mapped staging buffer, so this precedes the unmap.
+  gx::finalize_frame_interpolation();
+  const uint32_t interpolationSlots =
+      gx::has_interpolated_frame() && gx::frame_interpolation_replay_safe() ? gx::interpolated_frame_count() : 0;
 
   const size_t stagingSlot = frame.stagingBuffer;
-  render_worker::enqueue_end_frame(frameId, [frameSlot, stagingSlot, callback = std::move(callback)]() mutable {
+  render_worker::enqueue_end_frame(frameId, [frameSlot, stagingSlot, interpolationSlots,
+                                             callback = std::move(callback)]() mutable {
     auto& packet = g_framePackets[frameSlot];
     g_stagingBuffers[stagingSlot].Unmap();
     g_mappingStates[stagingSlot].store(BufferMapState::Unmapped, std::memory_order_release);
     auto encoder = std::move(packet.encoder);
     const auto stats = packet.stats;
     auto afterSubmitCallbacks = std::move(packet.afterSubmitCallbacks);
-    packet = {};
+    const InterpolationReplay replay{
+        .slots = interpolationSlots,
+        .encode =
+            [&packet](wgpu::CommandEncoder& cmd, uint32_t slot) {
+              if (slot == 0) {
+                detail::encode_full_staging_copy(cmd, packet);
+              }
+              gx::g_interpolationEncodeSlot = static_cast<int>(slot);
+              for (const auto& op : packet.ops) {
+                detail::encode_replay_op(cmd, packet, op);
+              }
+              gx::g_interpolationEncodeSlot = -1;
+            },
+    };
     g_resources.stats.drawCallCount = stats.drawCallCount;
     g_resources.stats.mergedDrawCallCount = stats.mergedDrawCallCount;
     g_resources.stats.lastVertSize = stats.lastVertSize;
@@ -796,8 +817,9 @@ void end_frame(EndFrameCallback callback) {
     g_resources.stats.lastTextureUploadSize = stats.lastTextureUploadSize;
 
     if (callback) {
-      callback(encoder, std::move(afterSubmitCallbacks));
+      callback(encoder, std::move(afterSubmitCallbacks), replay);
     }
+    packet = {};
 
     g_frameSlots.release(frameSlot);
     notify_gpu_progress();

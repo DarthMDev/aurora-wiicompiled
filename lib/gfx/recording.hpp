@@ -3,6 +3,8 @@
 #include "types.hpp"
 
 #include <cstddef>
+#include <span>
+#include <utility>
 #include <memory>
 #include <string>
 
@@ -89,6 +91,11 @@ Range push_indices(ArrayRef<T> data, size_t alignment) {
   return push_indices(reinterpret_cast<const uint8_t*>(data.data()), data.size() * sizeof(T), alignment);
 }
 Range push_uniform(const uint8_t* data, size_t length);
+// Reserves uniform space to be written later in this frame.
+std::pair<std::span<uint8_t>, Range> map_uniform(size_t length);
+// Staged bytes of a range pushed this frame.
+const uint8_t* uniform_data(const Range& range) noexcept;
+const uint8_t* vertex_data(const Range& range) noexcept;
 template <typename T>
 Range push_uniform(const T& data) {
   return push_uniform(reinterpret_cast<const uint8_t*>(&data), sizeof(T));

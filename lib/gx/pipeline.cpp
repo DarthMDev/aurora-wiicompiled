@@ -1,6 +1,8 @@
 #include "pipeline.hpp"
+#include "frame_interpolation.hpp"
 
 #include "../gfx/encoding.hpp"
+#include "../gfx/recording.hpp"
 #include "../gfx/resources.hpp"
 #include "../gfx/pipeline_cache.hpp"
 #include "../gfx/resource_cache.hpp"
@@ -64,7 +66,11 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
   }
   const auto& resources = gfx::detail::resources();
   pass.SetImmediates(0, &data.immediateData, sizeof(data.immediateData));
-  const std::array offsets{data.uniformRange.offset};
+  uint32_t uniformOffset = data.uniformRange.offset;
+  if (const int slot = g_interpolationEncodeSlot; slot >= 0 && data.interpUniformBase != UINT32_MAX) {
+    uniformOffset = data.interpUniformBase + static_cast<uint32_t>(slot) * gfx::align_uniform(data.uniformRange.size);
+  }
+  const std::array offsets{uniformOffset};
   pass.SetBindGroup(1, resources.uniformBindGroup, offsets.size(), offsets.data());
   if (data.bindGroups.textureBindGroup) {
     pass.SetBindGroup(2, gfx::find_bind_group(data.bindGroups.textureBindGroup));
