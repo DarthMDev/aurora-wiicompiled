@@ -1287,6 +1287,19 @@ std::pair<std::span<uint8_t>, Range> map_uniform(size_t length) {
   return {std::span{uniforms.data() + range.offset, range.size}, range};
 }
 
+bool uniform_space_available(size_t length, size_t count, size_t reserve) noexcept {
+  if (!g_recorder.active()) {
+    return false;
+  }
+  const auto& uniforms = current_frame_packet().uniforms;
+  if (uniforms.owned()) {
+    return true;
+  }
+  const size_t alignment = resources().limits.minUniformBufferOffsetAlignment;
+  const size_t needed = count * AURORA_ALIGN(length, alignment) + alignment + reserve;
+  return uniforms.size() + needed <= uniforms.capacity();
+}
+
 const uint8_t* uniform_data(const Range& range) noexcept {
   return current_frame_packet().uniforms.data() + range.offset;
 }

@@ -4,8 +4,11 @@
 
 #include <aurora/aurora.h>
 
+#include <algorithm>
 #include <array>
 #include <cassert>
+#include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -283,6 +286,8 @@ public:
   [[nodiscard]] uint8_t* data() noexcept { return m_data; }
   [[nodiscard]] const uint8_t* data() const noexcept { return m_data; }
   [[nodiscard]] size_t size() const noexcept { return m_length; }
+  [[nodiscard]] size_t capacity() const noexcept { return m_capacity; }
+  [[nodiscard]] bool owned() const noexcept { return m_owned; }
   [[nodiscard]] bool empty() const noexcept { return m_length == 0; }
 
   void append(const void* data, size_t size) {
@@ -329,24 +334,25 @@ private:
   void resize(size_t size, bool zeroed) {
     if (size == 0) {
       clear();
-    } else if (m_data == nullptr) {
-      m_data = static_cast<uint8_t*>(zeroed ? calloc(1, size) : malloc(size));
-      m_owned = true;
-    } else if (size > m_capacity) {
-      if (!m_owned) {
-        abort();
-      }
-      if (size < m_capacity * 2) {
-        size = m_capacity * 2;
-      }
-      m_data = static_cast<uint8_t*>(realloc(m_data, size));
-      if (zeroed) {
-        memset(m_data + m_capacity, 0, size - m_capacity);
-      }
-    } else {
       return;
     }
-    m_capacity = size;
+    if (m_data == nullptr) {
+      m_data = static_cast<uint8_t*>(malloc(size));
+      m_owned = true;
+      m_capacity = size;
+    } else if (size > m_capacity) {
+      if (!m_owned) {
+        fprintf(stderr, "ByteBuffer overflow: %zu bytes requested, mapped capacity %zu\n", size, m_capacity);
+        abort();
+      }
+      const size_t capacity = std::max(size, m_capacity * 2);
+      m_data = static_cast<uint8_t*>(realloc(m_data, capacity));
+      m_capacity = capacity;
+    }
+    // Reused capacity holds stale bytes, so zero exactly the newly exposed range.
+    if (zeroed && size > m_length) {
+      memset(m_data + m_length, 0, size - m_length);
+    }
   }
 };
 

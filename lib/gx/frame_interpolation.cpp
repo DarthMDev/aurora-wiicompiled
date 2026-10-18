@@ -1514,8 +1514,11 @@ std::array<gfx::Range, MaxInterpolatedFrames> record_interpolation_draw(
       (uniformLayout.indexedMatrices && s_previousFrameHasIndexedMatrices);
   // A frame already split by a submitted prefix duplicates its slots instead of
   // replaying, so staging copies for the resumed suffix would only waste space.
-  if (frame_interpolation_replay_safe() && stageInterpolation) {
-    const uint32_t sampleCount = s_activeInterpolationSamples.load(std::memory_order_acquire);
+  // Interpolated copies multiply uniform usage; past the staging budget the draw just presents uninterpolated.
+  constexpr size_t UniformReserve = 2u << 20;
+  const uint32_t sampleCount = s_activeInterpolationSamples.load(std::memory_order_acquire);
+  if (frame_interpolation_replay_safe() && stageInterpolation &&
+      gfx::uniform_space_available(uniformLayout.uniformSize, sampleCount, UniformReserve)) {
     for (uint32_t sample = 0; sample < sampleCount; ++sample) {
       auto [interpolatedBuffer, interpolatedRange] = gfx::map_uniform(uniformLayout.uniformSize);
       s_pendingUniformInterpolations.push_back({
