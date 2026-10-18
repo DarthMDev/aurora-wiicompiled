@@ -581,7 +581,17 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   }
   config.shaderConfig.tevSwapTable = g_gxState.tevSwapTable;
   for (u8 i = 0; i < g_gxState.numTevStages; ++i) {
-    config.shaderConfig.tevStages[i] = g_gxState.tevStages[i];
+    auto& stage = config.shaderConfig.tevStages[i];
+    stage = g_gxState.tevStages[i];
+    // GX reads texcoord 0 for a coordinate beyond the texgen count, and samples nothing without texgens.
+    if (stage.texCoordId != GX_TEXCOORD_NULL && underlying(stage.texCoordId) >= g_gxState.numTexGens) {
+      if (g_gxState.numTexGens == 0) {
+        stage.texCoordId = GX_TEXCOORD_NULL;
+        stage.texMapId = GX_TEXMAP_NULL;
+      } else {
+        stage.texCoordId = GX_TEXCOORD0;
+      }
+    }
   }
   config.shaderConfig.tevStageCount = g_gxState.numTevStages;
   for (u8 i = 0; i < g_gxState.numIndStages; ++i) {

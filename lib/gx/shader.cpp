@@ -626,7 +626,7 @@ std::string vtx_attr(const ShaderConfig& config, GXAttr attr) {
     }
 
     if (attr == GX_VA_CLR0 || attr == GX_VA_CLR1) {
-      return "vec4f(0.0, 0.0, 0.0, 0.0)"s;
+      return "vec4f(1.0)"s;
     }
     // Some retail materials generate UVs without a texture-coordinate vertex attribute.
     if (attr >= GX_VA_TEX0 && attr <= GX_VA_TEX7) {
@@ -867,6 +867,19 @@ constexpr std::string_view nbt_slice_local(NbtSlice slice) noexcept {
 
 constexpr bool is_emboss_texgen(GXTexGenType type) noexcept { return type >= GX_TG_BUMP0 && type <= GX_TG_BUMP7; }
 
+// Vertex colors are packed in order: a lone CLR1 feeds channel 0, and a missing color reads white.
+std::string vertex_color_attr(const ShaderConfig& config, u8 channel) {
+  const bool hasColor0 = config.attrs[GX_VA_CLR0].attrType != GX_NONE;
+  const bool hasColor1 = config.attrs[GX_VA_CLR1].attrType != GX_NONE;
+  if (channel == 0 && (hasColor0 || hasColor1)) {
+    return vtx_attr(config, hasColor0 ? GX_VA_CLR0 : GX_VA_CLR1);
+  }
+  if (channel == 1 && hasColor0 && hasColor1) {
+    return vtx_attr(config, GX_VA_CLR1);
+  }
+  return "vec4f(1.0)"s;
+}
+
 auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8 i, bool alpha) -> std::string {
   std::string_view swizzle = alpha ? ".a"sv : ""sv;
   std::string outVar = fmt::format("out.cc{}", i);
@@ -876,13 +889,13 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8 
   std::string ambSrc, matSrc;
 
   if (cc.ambSrc == GX_SRC_VTX) {
-    ambSrc = vtx_attr(config, static_cast<GXAttr>(GX_VA_CLR0 + i));
+    ambSrc = vertex_color_attr(config, i);
   } else if (cc.ambSrc == GX_SRC_REG) {
     ambSrc = fmt::format("ubuf.cc{0}{1}_amb", i, alpha ? "a"sv : ""sv);
   }
 
   if (cc.matSrc == GX_SRC_VTX) {
-    matSrc = vtx_attr(config, static_cast<GXAttr>(GX_VA_CLR0 + i));
+    matSrc = vertex_color_attr(config, i);
   } else if (cc.matSrc == GX_SRC_REG) {
     matSrc = fmt::format("ubuf.cc{0}{1}_mat", i, alpha ? "a"sv : ""sv);
   }
@@ -1938,8 +1951,21 @@ fn load_u16(p: ptr<storage, array<u32>>, byte_off: u32, le: bool) -> u32 {{
   return bswap16(raw, le);
 }}
 
+// Three bytes at offsets zero or one fit in one word; the next word may lie past the binding.
+fn load_u24_raw(p: ptr<storage, array<u32>>, byte_off: u32) -> u32 {{
+  let word_idx = byte_off >> 2u;
+  let sub = byte_off & 3u;
+  let word = load_word(p, word_idx);
+  if (sub <= 1u) {{
+    return (word >> (sub * 8u)) & 0x00FFFFFFu;
+  }}
+  let next = load_word(p, word_idx + 1u);
+  let shift = sub * 8u;
+  return ((word >> shift) | (next << (32u - shift))) & 0x00FFFFFFu;
+}}
+
 fn load_u24(p: ptr<storage, array<u32>>, byte_off: u32, le: bool) -> u32 {{
-  let raw = load_u32_raw(p, byte_off) & 0x00FFFFFFu;
+  let raw = load_u24_raw(p, byte_off);
   if (le) {{
     return raw;
   }}
@@ -1979,7 +2005,7 @@ fn raw_fetch_u8_2(p: ptr<storage, array<u32>>, byte_off: u32) -> vec2u {{
 }}
 
 fn raw_fetch_u8_3(p: ptr<storage, array<u32>>, byte_off: u32) -> vec3u {{
-  let raw = load_u32_raw(p, byte_off);
+  let raw = load_u24_raw(p, byte_off);
   return vec3u(
     extractBits(raw, 0u, 8u),
     extractBits(raw, 8u, 8u),
