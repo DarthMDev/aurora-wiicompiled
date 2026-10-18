@@ -27,7 +27,9 @@
 
 #ifdef WEBGPU_DAWN
 #include "../dawn/TracyPlatform.hpp"
+#ifndef __MINGW32__
 #include <dawn/native/DawnNative.h>
+#endif
 #endif
 
 namespace aurora::webgpu {
@@ -796,6 +798,10 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
         .enabledToggleCount = instanceToggles.size(),
         .enabledToggles = instanceToggles.data(),
     }};
+#ifdef __MINGW32__
+    // DawnNative.h's C++ descriptor has an MSVC ABI that llvm-mingw cannot link against.
+    instanceDescriptor.nextInChain = &instanceTogglesDescriptor;
+#else
     dawn::native::DawnInstanceDescriptor dawnInstanceDescriptor{};
     dawnInstanceDescriptor.nextInChain = &instanceTogglesDescriptor;
 #ifdef AURORA_GFX_DEBUG_GROUPS
@@ -810,6 +816,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
     dawnInstanceDescriptor.platform = tracy_dawn_platform();
 #endif
     instanceDescriptor.nextInChain = &dawnInstanceDescriptor;
+#endif
 #endif
     g_instance = wgpu::CreateInstance(&instanceDescriptor);
     if (!g_instance) {

@@ -14,7 +14,10 @@ include("${CMAKE_CURRENT_LIST_DIR}/AuroraTargetPlatform.cmake")
 function(_aurora_dawn_set_platform_backends)
   if (WIN32)
     set(DAWN_ENABLE_D3D12 ON CACHE INTERNAL "")
-    set(DAWN_ENABLE_D3D11 ON CACHE INTERNAL "")
+    # A parent project may have disabled D3D11 already; keep its choice.
+    if (NOT DEFINED DAWN_ENABLE_D3D11)
+      set(DAWN_ENABLE_D3D11 ON CACHE INTERNAL "")
+    endif ()
     set(DAWN_ENABLE_VULKAN ON CACHE INTERNAL "")
     set(DAWN_ENABLE_METAL OFF CACHE INTERNAL "")
     set(DAWN_ENABLE_DESKTOP_GL OFF CACHE INTERNAL "")
@@ -79,6 +82,15 @@ endfunction()
 aurora_get_target_arch(_dawn_target_arch)
 string(TOLOWER "${CMAKE_SYSTEM_NAME}" _dawn_system)
 string(TOLOWER "${_dawn_target_arch}" _dawn_arch)
+# Package names use amd64/arm64 on Windows; toolchains may report x86_64/aarch64.
+if (_dawn_system STREQUAL "windows")
+  if (_dawn_arch STREQUAL "x86_64")
+    set(_dawn_arch "amd64")
+  elseif (_dawn_arch STREQUAL "aarch64")
+    set(_dawn_arch "arm64")
+  endif ()
+endif ()
+set(AURORA_DAWN_PACKAGE_REPO "encounter/dawn" CACHE STRING "GitHub repository serving prebuilt Dawn packages")
 set(_has_dawn_package FALSE)
 if ("${_dawn_system}-${_dawn_arch}" MATCHES "^(windows-(amd64|arm64)|linux-(x86_64|aarch64)|darwin-(arm64|x86_64)|ios-arm64|android-aarch64)$")
   set(_has_dawn_package TRUE)
@@ -183,13 +195,28 @@ elseif (_aurora_dawn_provider STREQUAL "package")
         " with CMAKE_OSX_ARCHITECTURES='${CMAKE_OSX_ARCHITECTURES}'.")
     endif ()
     set(AURORA_DAWN_PACKAGE_URL
-      "https://github.com/encounter/dawn/releases/download/${AURORA_DAWN_VERSION}/dawn-${_dawn_system}-${_dawn_arch}.tar.gz")
+      "https://github.com/${AURORA_DAWN_PACKAGE_REPO}/releases/download/${AURORA_DAWN_VERSION}/dawn-${_dawn_system}-${_dawn_arch}.tar.gz")
+
+    # Release assets are mutable and a cached extraction is never re-verified; pin known digests.
+    if (NOT AURORA_DAWN_PACKAGE_URL_HASH AND AURORA_DAWN_PACKAGE_REPO STREQUAL "encounter/dawn"
+        AND AURORA_DAWN_VERSION STREQUAL "v20260807.225922")
+      if (_dawn_system STREQUAL "windows" AND _dawn_arch STREQUAL "amd64")
+        set(AURORA_DAWN_PACKAGE_URL_HASH
+          "SHA256=42a7a295c87b2e8a36312e2f84a5823aac63325e8e1d271bc7ced6f83bfb075f")
+      endif ()
+    endif ()
   endif ()
   message(STATUS "aurora: Fetching prebuilt Dawn package from ${AURORA_DAWN_PACKAGE_URL}")
+
+  set(_dawn_prebuilt_hash_argument "")
+  if (AURORA_DAWN_PACKAGE_URL_HASH)
+    set(_dawn_prebuilt_hash_argument URL_HASH "${AURORA_DAWN_PACKAGE_URL_HASH}")
+  endif ()
 
   include(FetchContent)
   FetchContent_Declare(dawn_prebuilt
     URL "${AURORA_DAWN_PACKAGE_URL}"
+    ${_dawn_prebuilt_hash_argument}
     DOWNLOAD_EXTRACT_TIMESTAMP FALSE
   )
   FetchContent_MakeAvailable(dawn_prebuilt)

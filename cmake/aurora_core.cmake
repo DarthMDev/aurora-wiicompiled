@@ -47,7 +47,7 @@ endif ()
 
 if (CMAKE_SYSTEM_NAME STREQUAL Windows)
     # stuff for fetching system info.
-    target_link_libraries(aurora_core PRIVATE wbemuuid.lib comsuppw.lib ntdll.lib DXGI.lib)
+    target_link_libraries(aurora_core PRIVATE ntdll dxgi advapi32)
 elseif (APPLE)
     target_sources(aurora_core PRIVATE lib/system_info_mac.mm)
 endif ()

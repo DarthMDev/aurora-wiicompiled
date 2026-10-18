@@ -15,6 +15,7 @@ option(AURORA_ENABLE_THP "Enable THP decoder" ON)
 option(AURORA_ENABLE_RMLUI "Enable HTML/CSS Based UI Library for use in end-user UI development." OFF)
 option(AURORA_CACHE_USE_ZSTD "Compress WebGPU cache entries with zstd" ON)
 option(AURORA_TARGET_RVL "Target the Revolution (Wii) SDK instead of Dolphin (GameCube)" OFF)
+option(AURORA_USE_SYSTEM_DEPENDENCIES "Allow third-party dependencies to be found on the host system" ON)
 
 include(CMakeDependentOption)
 cmake_dependent_option(AURORA_ENABLE_EXAMPLES "Enable examples" ON "CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR" OFF)
@@ -44,6 +45,7 @@ set(AURORA_SDL3_PROVIDER "${_default_provider}" CACHE STRING
 set_property(CACHE AURORA_SDL3_PROVIDER PROPERTY STRINGS auto vendor system package)
 set(AURORA_SDL3_LINKAGE "${_default_linkage}" CACHE STRING "SDL3 linkage type preference")
 set_property(CACHE AURORA_SDL3_LINKAGE PROPERTY STRINGS shared static)
+option(AURORA_SDL3_LIBUSB "Build the vendored SDL3 with libusb on Windows (official GameCube adapter support)" ON)
 
 # nod (if AURORA_ENABLE_DVD)
 set(AURORA_NOD_PROVIDER "${_default_provider}" CACHE STRING

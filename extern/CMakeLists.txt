@@ -9,9 +9,63 @@ else ()
   set(_USE_SHARED OFF)
 endif ()
 
+# With AURORA_USE_SYSTEM_DEPENDENCIES OFF every dependency is fetched, so a
+# build never links libraries that happen to be installed on the build host.
 function(aurora_find_package_global)
-  find_package(${ARGV} GLOBAL)
+  if (AURORA_USE_SYSTEM_DEPENDENCIES)
+    find_package(${ARGV} GLOBAL)
+  endif ()
 endfunction()
+
+macro(aurora_find_pkgconfig)
+  if (AURORA_USE_SYSTEM_DEPENDENCIES)
+    find_package(PkgConfig QUIET)
+  else ()
+    set(PkgConfig_FOUND FALSE)
+  endif ()
+endmacro()
+
+# A macOS build for another architecture must not discover Homebrew packages
+# built for its physical host. CMAKE_CROSSCOMPILING is not sufficient here:
+# Apple Clang can target another architecture through CMAKE_OSX_ARCHITECTURES
+# without CMake considering the configure a cross-build.
+set(_AURORA_EXCLUDE_HOST_HOMEBREW FALSE)
+if (APPLE AND CMAKE_OSX_ARCHITECTURES)
+  list(LENGTH CMAKE_OSX_ARCHITECTURES _AURORA_OSX_ARCH_COUNT)
+  if (_AURORA_OSX_ARCH_COUNT EQUAL 1)
+    list(GET CMAKE_OSX_ARCHITECTURES 0 _AURORA_TARGET_ARCH)
+    string(TOLOWER "${_AURORA_TARGET_ARCH}" _AURORA_TARGET_ARCH)
+    # hw.optional.arm64 identifies Apple Silicon even when CMake itself runs
+    # through Rosetta, where CMAKE_HOST_SYSTEM_PROCESSOR reports x86_64.
+    execute_process(
+      COMMAND /usr/sbin/sysctl -n hw.optional.arm64
+      RESULT_VARIABLE _AURORA_ARM64_PROBE_RESULT
+      OUTPUT_VARIABLE _AURORA_ARM64_PROBE
+      ERROR_QUIET
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if (_AURORA_ARM64_PROBE_RESULT EQUAL 0 AND _AURORA_ARM64_PROBE STREQUAL "1")
+      set(_AURORA_HOST_ARCH arm64)
+    else ()
+      execute_process(
+        COMMAND /usr/bin/uname -m
+        OUTPUT_VARIABLE _AURORA_HOST_ARCH
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+      string(TOLOWER "${_AURORA_HOST_ARCH}" _AURORA_HOST_ARCH)
+    endif ()
+    if (_AURORA_TARGET_ARCH STREQUAL "x86_64" AND _AURORA_HOST_ARCH MATCHES "^(arm64|aarch64)$")
+      list(APPEND CMAKE_IGNORE_PREFIX_PATH "/opt/homebrew")
+      set(_AURORA_EXCLUDE_HOST_HOMEBREW TRUE)
+    elseif (_AURORA_TARGET_ARCH MATCHES "^(arm64|aarch64)$" AND _AURORA_HOST_ARCH MATCHES "^(x86_64|amd64)$")
+      list(APPEND CMAKE_IGNORE_PREFIX_PATH "/usr/local")
+      set(_AURORA_EXCLUDE_HOST_HOMEBREW TRUE)
+    endif ()
+  endif ()
+endif ()
+
+if (_AURORA_EXCLUDE_HOST_HOMEBREW)
+  list(REMOVE_DUPLICATES CMAKE_IGNORE_PREFIX_PATH)
+  message(STATUS "aurora: cross-architecture macOS build; ignoring host Homebrew prefixes")
+endif ()
 
 if (AURORA_ENABLE_GX)
   include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/AuroraDawnProvider.cmake)
@@ -45,6 +99,14 @@ else ()
   endif ()
 endif ()
 
+# SDL's pkg-config probe can bypass CMake's prefix exclusion. macOS does not
+# need libusb for the supported SDL input paths, so keep that host-only library
+# out of a cross-architecture configure.
+if (_AURORA_EXCLUDE_HOST_HOMEBREW)
+  set(SDL_HIDAPI_LIBUSB OFF CACHE BOOL "" FORCE)
+  set(SDL_HIDAPI_LIBUSB_SHARED OFF CACHE BOOL "" FORCE)
+endif ()
+
 include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/AuroraSDL3Provider.cmake)
 
 if (NOT TARGET xxHash::xxhash)
@@ -53,9 +115,9 @@ endif ()
 if (NOT TARGET xxHash::xxhash)
   message(STATUS "aurora: Fetching xxhash")
   FetchContent_Declare(xxhash
-    URL https://github.com/Cyan4973/xxHash/archive/refs/tags/v0.8.3.tar.gz
-    URL_HASH SHA256=aae608dfe8213dfd05d909a57718ef82f30722c392344583d3f39050c7f29a80
-    SOURCE_SUBDIR cmake_unofficial
+    URL https://github.com/Cyan4973/xxHash/archive/refs/tags/v0.8.4.tar.gz
+    URL_HASH SHA256=5738270935e7c3d38a79b3adf7c9692566ce7895a25f67de43ad52ab504acd32
+    SOURCE_SUBDIR build/cmake
     DOWNLOAD_EXTRACT_TIMESTAMP FALSE
     EXCLUDE_FROM_ALL
   )
@@ -115,7 +177,7 @@ if (AURORA_ENABLE_GX)
     aurora_find_package_global(ZLIB QUIET)
   endif ()
   if (NOT TARGET ZLIB::ZLIB)
-    find_package(PkgConfig)
+    aurora_find_pkgconfig()
     if (PkgConfig_FOUND)
       pkg_check_modules(zlib IMPORTED_TARGET GLOBAL zlib)
       if (TARGET PkgConfig::zlib)
@@ -159,7 +221,7 @@ if (AURORA_ENABLE_GX)
     else ()
       aurora_find_package_global(PNG QUIET)
       if (NOT TARGET PNG::PNG)
-        find_package(PkgConfig)
+        aurora_find_pkgconfig()
         if (PkgConfig_FOUND)
           pkg_check_modules(libpng IMPORTED_TARGET GLOBAL libpng)
           if (TARGET PkgConfig::libpng)
@@ -196,7 +258,7 @@ if (AURORA_ENABLE_GX)
 
   aurora_find_package_global(Freetype QUIET)
   if (NOT TARGET Freetype::Freetype)
-    find_package(PkgConfig)
+    aurora_find_pkgconfig()
     if (PkgConfig_FOUND)
       pkg_check_modules(freetype2 IMPORTED_TARGET GLOBAL freetype2)
       if (TARGET PkgConfig::freetype2)
@@ -232,7 +294,7 @@ if (AURORA_ENABLE_GX)
     message(STATUS "aurora: Using existing sqlite3")
     add_library(sqlite3 ALIAS SQLite::SQLite3)
   else ()
-    find_package(PkgConfig)
+    aurora_find_pkgconfig()
     if (PkgConfig_FOUND)
       pkg_check_modules(sqlite3 IMPORTED_TARGET GLOBAL sqlite3)
       if (TARGET PkgConfig::sqlite3)
@@ -258,7 +320,7 @@ if (AURORA_ENABLE_GX)
   if (AURORA_CACHE_USE_ZSTD)
     aurora_find_package_global(zstd CONFIG QUIET)
     if (NOT TARGET zstd::libzstd)
-      find_package(PkgConfig QUIET)
+      aurora_find_pkgconfig()
       if(PkgConfig_FOUND)
         pkg_check_modules(ZSTD libzstd IMPORTED_TARGET GLOBAL)
         if(ZSTD_FOUND)
@@ -270,6 +332,28 @@ if (AURORA_ENABLE_GX)
       message(STATUS "aurora: Fetching zstd")
       set(ZSTD_BUILD_STATIC ON)
       set(ZSTD_BUILD_SHARED OFF)
+      set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "BUILD PROGRAMS" FORCE)
+      set(ZSTD_BUILD_TESTS OFF CACHE BOOL "BUILD TESTS" FORCE)
+      if (WIN32 AND CMAKE_C_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        set(C_FLAG_WALL TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_WALL TRUE CACHE INTERNAL "")
+        set(C_FLAG_WEXTRA TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_WEXTRA TRUE CACHE INTERNAL "")
+        set(C_FLAG_WUNDEF TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_WUNDEF TRUE CACHE INTERNAL "")
+        set(C_FLAG_WSHADOW TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_WSHADOW TRUE CACHE INTERNAL "")
+        set(C_FLAG_WCAST_ALIGN TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_WCAST_ALIGN TRUE CACHE INTERNAL "")
+        set(C_FLAG_WCAST_QUAL TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_WCAST_QUAL TRUE CACHE INTERNAL "")
+        set(C_FLAG_WSTRICT_PROTOTYPES TRUE CACHE INTERNAL "")
+        set(LD_FLAG_WL_Z_NOEXECSTACK FALSE CACHE INTERNAL "")
+        set(C_FLAG_QUNUSED_ARGUMENTS TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_QUNUSED_ARGUMENTS TRUE CACHE INTERNAL "")
+        set(C_FLAG_WA_NOEXECSTACK TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_WA_NOEXECSTACK TRUE CACHE INTERNAL "")
+      endif()
 
       FetchContent_Declare(zstd
         URL https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz

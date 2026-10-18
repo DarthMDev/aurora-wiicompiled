@@ -42,7 +42,8 @@ if (_aurora_sdl3_provider STREQUAL "auto")
     set(_aurora_sdl3_provider "package")
   else ()
     set(CMAKE_FIND_PACKAGE_TARGETS_GLOBAL ON)
-    find_package(SDL3 QUIET)
+    # Do not select an older system SDL than the pinned version.
+    find_package(SDL3 ${AURORA_SDL3_VERSION} QUIET)
     set(CMAKE_FIND_PACKAGE_TARGETS_GLOBAL OFF)
     if (SDL3_FOUND)
       set(_aurora_sdl3_provider "system")
@@ -59,7 +60,7 @@ if (_aurora_sdl3_provider STREQUAL "system")
   message(STATUS "aurora: Using system SDL3 (provider=system)")
   if (NOT SDL3_FOUND)
     set(CMAKE_FIND_PACKAGE_TARGETS_GLOBAL ON)
-    find_package(SDL3 REQUIRED)
+    find_package(SDL3 ${AURORA_SDL3_VERSION} REQUIRED)
     set(CMAKE_FIND_PACKAGE_TARGETS_GLOBAL OFF)
   endif ()
   _aurora_sdl3_select_target()
@@ -67,7 +68,11 @@ if (_aurora_sdl3_provider STREQUAL "system")
 elseif (_aurora_sdl3_provider STREQUAL "package")
   # ── Package: download custom build or official SDL3 development package ──
   if (NOT AURORA_SDL3_PACKAGE_URL)
-    if (WIN32)
+    if (MINGW)
+      # WIN32 is also true for MinGW; select the GNU-ABI package first.
+      set(AURORA_SDL3_PACKAGE_URL
+        "https://github.com/libsdl-org/SDL/releases/download/release-${AURORA_SDL3_VERSION}/SDL3-devel-${AURORA_SDL3_VERSION}-mingw.tar.gz")
+    elseif (WIN32)
       # We have custom builds of SDL3 for Win32 x86/AMD64 with libusb support included
       aurora_get_target_arch(_target_arch)
       set(_sdl3_arch "")
@@ -81,9 +86,6 @@ elseif (_aurora_sdl3_provider STREQUAL "package")
         set(AURORA_SDL3_PACKAGE_URL
           "https://github.com/libsdl-org/SDL/releases/download/release-${AURORA_SDL3_VERSION}/SDL3-devel-${AURORA_SDL3_VERSION}-VC.zip")
       endif ()
-    elseif (MINGW)
-      set(AURORA_SDL3_PACKAGE_URL
-        "https://github.com/libsdl-org/SDL/releases/download/release-${AURORA_SDL3_VERSION}/SDL3-devel-${AURORA_SDL3_VERSION}-mingw.tar.gz")
     else ()
       message(FATAL_ERROR
         "AURORA_SDL3_PROVIDER=package requires AURORA_SDL3_PACKAGE_URL on non-Windows platforms.\n"
@@ -136,9 +138,18 @@ elseif (_aurora_sdl3_provider STREQUAL "vendor")
     endif ()
     if (WIN32)
       set(SDL_LIBC ON CACHE BOOL "Use the system C library" FORCE)
+      if (AURORA_SDL3_LIBUSB)
+        include("${CMAKE_CURRENT_LIST_DIR}/AuroraLibUSB.cmake")
+      endif ()
     endif ()
 
     include(FetchContent)
+    # PATCH_COMMAND does not run for a tree handed in through FETCHCONTENT_SOURCE_DIR_SDL.
+    set(_aurora_sdl3_patches "${CMAKE_CURRENT_LIST_DIR}/AuroraSDL3Patches.cmake")
+    include("${_aurora_sdl3_patches}")
+    if (DEFINED FETCHCONTENT_SOURCE_DIR_SDL AND EXISTS "${FETCHCONTENT_SOURCE_DIR_SDL}")
+      aurora_sdl3_apply_patches("${FETCHCONTENT_SOURCE_DIR_SDL}")
+    endif ()
     FetchContent_Declare(SDL
       URL "https://github.com/libsdl-org/SDL/archive/${AURORA_SDL3_REF}.tar.gz"
       DOWNLOAD_EXTRACT_TIMESTAMP FALSE
@@ -148,6 +159,9 @@ elseif (_aurora_sdl3_provider STREQUAL "vendor")
       COMMAND ${CMAKE_COMMAND}
         -DSDL_SOURCE_DIR=<SOURCE_DIR>
         -P "${CMAKE_CURRENT_LIST_DIR}/patches/apply-sdl3-android-security-exception.cmake"
+      COMMAND ${CMAKE_COMMAND}
+        -DSDL_SOURCE_DIR=<SOURCE_DIR>
+        -P "${_aurora_sdl3_patches}"
       EXCLUDE_FROM_ALL
     )
     FetchContent_MakeAvailable(SDL)

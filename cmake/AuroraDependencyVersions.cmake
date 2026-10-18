@@ -21,3 +21,4 @@ _aurora_dependency_version(AURORA_SDL3_VERSION "3.4.10" "SDL3 prebuilt version t
 _aurora_dependency_version(AURORA_SDL3_REF "refs/tags/release-3.4.10" "SDL3 commit ref (https://github.com/libsdl-org/SDL)")
 _aurora_dependency_version(AURORA_NOD_VERSION "v2.0.0-alpha.12" "nod version tag (https://github.com/encounter/nod/releases)"
         "v2.0.0-alpha.10" "v2.0.0-alpha.11") # Previous versions
+_aurora_dependency_version(AURORA_LIBUSB_VERSION "1.0.30" "libusb version tag (https://github.com/libusb/libusb/releases)")

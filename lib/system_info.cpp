@@ -4,9 +4,6 @@
 #if _WIN32
 #define WIN32_LEAN_AND_MEAN 1
 #include <windows.h>
-#include <combaseapi.h>
-#include <Wbemidl.h>
-#include <comutil.h>
 #include <dxgi.h>
 #include <wrl/client.h>
 
@@ -54,10 +51,6 @@ void log_system_information() {
 }
 
 #if _WIN32
-struct ComGuard {
-  ~ComGuard() { CoUninitialize(); }
-};
-
 static std::string wideStringToUtf8(std::wstring_view str) {
   const auto size =
       WideCharToMultiByte(CP_UTF8, 0, str.data(), static_cast<int>(str.size()), nullptr, 0, nullptr, nullptr);
@@ -72,105 +65,24 @@ static std::string wideStringToUtf8(std::wstring_view str) {
 }
 
 std::string GetCpuModel() {
-  // Good fucking lord Microsoft, what the fuck is this?
-  // https://learn.microsoft.com/en-us/windows/win32/wmisdk/example--getting-wmi-data-from-the-local-computer
-
-  HRESULT hres = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-  if (FAILED(hres)) {
-    Log.error("COM initialization failed");
+  // Registry lookup: no COM, and links with every Windows toolchain.
+  HKEY key = nullptr;
+  if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"HARDWARE\DESCRIPTION\System\CentralProcessor\0", 0, KEY_QUERY_VALUE,
+                    &key) != ERROR_SUCCESS) {
+    Log.error("Unable to open the processor registry key");
     return Unknown;
   }
-
-  hres = CoInitializeSecurity(NULL,
-                              -1,                          // COM authentication
-                              NULL,                        // Authentication services
-                              NULL,                        // Reserved
-                              RPC_C_AUTHN_LEVEL_DEFAULT,   // Default authentication
-                              RPC_C_IMP_LEVEL_IMPERSONATE, // Default Impersonation
-                              NULL,                        // Authentication info
-                              EOAC_NONE,                   // Additional capabilities
-                              NULL                         // Reserved
-  );
-
-  if (FAILED(hres)) {
-    Log.error("COM security initialization failed");
+  wchar_t value[256]{};
+  DWORD type = 0;
+  DWORD size = sizeof(value);
+  const auto queried =
+      RegQueryValueExW(key, L"ProcessorNameString", nullptr, &type, reinterpret_cast<BYTE*>(value), &size);
+  RegCloseKey(key);
+  if (queried != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ)) {
+    Log.error("Unable to read the processor name");
     return Unknown;
   }
-
-  ComGuard comGuard{};
-
-  ComPtr<IWbemLocator> pLoc;
-
-  hres = CoCreateInstance(CLSID_WbemLocator, nullptr, CLSCTX_INPROC_SERVER, IID_IWbemLocator, &pLoc);
-  if (FAILED(hres)) {
-    Log.error("CoCreateInstance failed for IWbemLocator");
-    return Unknown;
-  }
-
-  ComPtr<IWbemServices> pSvc;
-
-  // Connect to the root\cimv2 namespace with
-  // the current user and obtain pointer pSvc
-  // to make IWbemServices calls.
-  hres = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), // Object path of WMI namespace
-                             NULL,                    // User name. NULL = current user
-                             NULL,                    // User password. NULL = current
-                             0,                       // Locale. NULL indicates current
-                             NULL,                    // Security flags.
-                             0,                       // Authority (for example, Kerberos)
-                             0,                       // Context object
-                             &pSvc                    // pointer to IWbemServices proxy
-  );
-  if (FAILED(hres)) {
-    Log.error("ConnectServer failed");
-    return Unknown;
-  }
-
-  hres = CoSetProxyBlanket(pSvc.Get(),                  // Indicates the proxy to set
-                           RPC_C_AUTHN_WINNT,           // RPC_C_AUTHN_xxx
-                           RPC_C_AUTHZ_NONE,            // RPC_C_AUTHZ_xxx
-                           NULL,                        // Server principal name
-                           RPC_C_AUTHN_LEVEL_CALL,      // RPC_C_AUTHN_LEVEL_xxx
-                           RPC_C_IMP_LEVEL_IMPERSONATE, // RPC_C_IMP_LEVEL_xxx
-                           NULL,                        // client identity
-                           EOAC_NONE                    // proxy capabilities
-  );
-
-  if (FAILED(hres)) {
-    Log.error("CoSetProxyBlanket failed");
-    return Unknown;
-  }
-
-  ComPtr<IEnumWbemClassObject> pEnumerator;
-  hres = pSvc->ExecQuery(bstr_t(L"WQL"), bstr_t(L"select Name from Win32_Processor"),
-                         WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator);
-  if (FAILED(hres)) {
-    Log.error("ExecQuery failed");
-    return Unknown;
-  }
-
-  ULONG uReturn = 0;
-
-  std::string result{};
-
-  while (pEnumerator) {
-    ComPtr<IWbemClassObject> pclsObj;
-    HRESULT hr = pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn);
-
-    if (0 == uReturn) {
-      break;
-    }
-
-    VARIANT vtProp;
-
-    VariantInit(&vtProp);
-    // Get the value of the Name property
-    hr = pclsObj->Get(L"Name", 0, &vtProp, nullptr, nullptr);
-    result = wideStringToUtf8(vtProp.bstrVal);
-    VariantClear(&vtProp);
-  }
-
-  return result;
+  return wideStringToUtf8(std::wstring_view(value, wcsnlen(value, std::size(value))));
 }
 
 uint64_t GetMemoryAmount() {
