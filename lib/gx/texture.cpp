@@ -595,6 +595,12 @@ GXState::CopyTextureRef resolve_copy_texture(const GXState::CopyTextureKey& key)
     copy = &s_copyCache.insert_pinned(key, {.handle = std::move(handle), .key = key}, bytes);
     ++s_stats.copyCacheMisses;
   }
+  if (copy->revision == 0 || s_frameCount - copy->producedFrame > 1) {
+    copy->consecutiveFrames = 0;
+  } else if (s_frameCount != copy->producedFrame) {
+    ++copy->consecutiveFrames;
+  }
+  copy->producedFrame = s_frameCount;
   ++copy->revision;
   current = *copy;
   update_cache_stats();

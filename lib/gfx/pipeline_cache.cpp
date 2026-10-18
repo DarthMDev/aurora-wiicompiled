@@ -1226,10 +1226,38 @@ void end_pipeline_frame() {
   }
 }
 
+static thread_local bool t_requireReadyPipelines = false;
+
+RequireReadyPipelinesScope::RequireReadyPipelinesScope(bool enabled) noexcept : m_previous(t_requireReadyPipelines) {
+  t_requireReadyPipelines = enabled;
+}
+
+RequireReadyPipelinesScope::~RequireReadyPipelinesScope() noexcept { t_requireReadyPipelines = m_previous; }
+
+static void move_pending_pipeline_to_front(PipelineRef hash) {
+  const auto it = find_pending_pipeline(g_pipelineQueue, hash);
+  if (it == g_pipelineQueue.end()) {
+    promote_pending_pipeline(hash, PipelinePriority::Blocking);
+    return;
+  }
+  if (it != g_pipelineQueue.begin()) {
+    PendingPipeline pending = std::move(*it);
+    g_pipelineQueue.erase(it);
+    g_pipelineQueue.emplace_front(std::move(pending));
+  }
+}
+
 bool get_pipeline(PipelineRef ref, CompiledPipeline& pipeline) {
   std::unique_lock guard{g_pipelineMutex};
   if (g_requiredPipelines.contains(ref)) {
     g_pipelineReadyCv.wait(guard, [=] { return g_pipelines.contains(ref) || g_pipelineThreadEnd; });
+  } else if (t_requireReadyPipelines && g_hasPipelineThread && !g_pipelines.contains(ref) &&
+             g_pendingPipelines.contains(ref)) {
+    move_pending_pipeline_to_front(ref);
+    g_pipelineQueueCv.notify_one();
+    g_pipelineReadyCv.wait(guard, [=] {
+      return g_pipelines.contains(ref) || !g_pendingPipelines.contains(ref) || g_pipelineThreadEnd;
+    });
   }
 
   const auto it = g_pipelines.find(ref);

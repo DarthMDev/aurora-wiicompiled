@@ -113,6 +113,8 @@ struct RenderPass {
   bool hasDraws = false;
   bool discardable = false;
   bool sealed = false;
+  // The pass feeds a texture the guest keeps, so its draws wait for pipelines instead of skipping.
+  bool requireReadyPipelines = false;
   std::vector<tex_palette_conv::ConvRequest> paletteConvs;
 
   RenderTargetLayout target_layout() const noexcept;

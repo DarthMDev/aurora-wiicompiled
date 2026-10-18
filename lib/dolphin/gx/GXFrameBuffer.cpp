@@ -16,6 +16,10 @@
 #include <unordered_map>
 
 namespace {
+// Color copies wait for compiling pipelines so bakes the guest keeps (icons, thumbnails) are never
+// missing draws. Only large copies that recur every frame, like post-processing, may skip.
+constexpr u32 CopyWarmupFrames = 8;
+constexpr u32 SmallCopyAreaDivisor = 4;
 constexpr u32 ProbeMaxBytes = 256;
 constexpr size_t MaxProbes = 32;
 
@@ -170,6 +174,11 @@ void copy_tex(const void* dest, GXBool clear, u32 copyControl) noexcept {
   const auto clearAlpha = clear && g_gxState.alphaUpdate && efb_has_alpha(g_gxState.pixelFmt);
   const auto clearDepth = clear && g_gxState.depthUpdate;
   const auto src = g_gxState.texCopySrc;
+  const auto [fbWidth, fbHeight] = logical_fb_size();
+  const bool smallCopy = static_cast<u64>(std::max(src.width, 0)) * std::max(src.height, 0) * SmallCopyAreaDivisor <=
+                         static_cast<u64>(fbWidth) * fbHeight;
+  const bool persistent =
+      !is_depth_format(texCopyFmt) && (smallCopy || copy.consecutiveFrames < CopyWarmupFrames);
   gfx::resolve_pass_into(copy.handle, rect, clearColor, clearAlpha, clearDepth, g_gxState.clearColor,
                          clear_depth_value(), texCopyFmt, g_gxState.pixelFmt,
                          {
@@ -177,6 +186,7 @@ void copy_tex(const void* dest, GXBool clear, u32 copyControl) noexcept {
                              .copyFilterRowStride = static_cast<float>(rect.height) / std::max(src.height, 1),
                              .clampTop = (copyControl & GX_CLAMP_TOP) != 0,
                              .clampBottom = (copyControl & GX_CLAMP_BOTTOM) != 0,
+                             .persistent = persistent,
                          });
 }
 } // namespace aurora::gx

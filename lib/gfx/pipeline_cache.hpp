@@ -43,4 +43,15 @@ PipelineRef find_pipeline(const rmlui::PipelineConfig& config);
 
 bool get_pipeline(PipelineRef ref, CompiledPipeline& pipeline);
 
+// While alive, get_pipeline on this thread waits for pending pipelines instead of skipping the draw.
+struct RequireReadyPipelinesScope {
+  explicit RequireReadyPipelinesScope(bool enabled) noexcept;
+  ~RequireReadyPipelinesScope() noexcept;
+  RequireReadyPipelinesScope(const RequireReadyPipelinesScope&) = delete;
+  RequireReadyPipelinesScope& operator=(const RequireReadyPipelinesScope&) = delete;
+
+private:
+  bool m_previous;
+};
+
 } // namespace aurora::gfx

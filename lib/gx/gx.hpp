@@ -329,6 +329,9 @@ struct GXState {
     u32 width = 0;
     u32 height = 0;
     GXPixelFmt pixelFormat = GX_PF_RGB8_Z24;
+    uint64_t producedFrame = 0;
+    // Frames in a row this copy has been produced; resets after a gap.
+    u32 consecutiveFrames = 0;
 
     operator bool() const noexcept { return handle.operator bool(); }
   };

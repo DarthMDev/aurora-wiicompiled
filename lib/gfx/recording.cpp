@@ -511,6 +511,7 @@ void start_offscreen(uint32_t width, uint32_t height) {
       .clearDepth = true,
       .hasDepth = true,
       .hasStencil = false,
+      .requireReadyPipelines = true,
   };
   set_single_color_target(newPass, g_recorder.offscreenColor.format, {width, height}, g_recorder.offscreenColor.view);
   current_render_passes().emplace_back(std::move(newPass));
@@ -853,6 +854,7 @@ void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bo
                        GXPixelFmt sourceFormat, const ResolveOptions& options) {
   // Resolve current render pass
   auto& prevPass = current_render_passes()[g_recorder.currentRenderPass];
+  prevPass.requireReadyPipelines |= options.persistent;
   prevPass.resolveTarget = std::move(texture);
   prevPass.resolveRect = rect;
   prevPass.resolveFormat = resolveFormat;
@@ -900,6 +902,7 @@ void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bo
       .clearDepth = clearDepth && fullTarget,
       .hasDepth = prevPass.hasDepth,
       .hasStencil = prevPass.hasStencil,
+      .requireReadyPipelines = g_recorder.inOffscreen,
   };
   const bool fullColorClear = clearColor && clearAlpha && fullTarget;
   for (uint32_t i = 0; i < newPass.colorAttachmentCount; ++i) {

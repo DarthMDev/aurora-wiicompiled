@@ -126,6 +126,7 @@ struct ResolveOptions {
   float copyFilterRowStride = 1.f;
   bool clampTop = false;
   bool clampBottom = false;
+  bool persistent = false;
 };
 
 void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
