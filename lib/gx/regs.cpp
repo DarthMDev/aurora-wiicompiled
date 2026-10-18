@@ -617,7 +617,17 @@ constexpr auto kBpRegs = [] {
 // Matrix index A (0x30)
 void cp_mtx_index(u8, u32 value) noexcept {
   g_gxState.currentPnMtx = reg_get(value, 6, 0) / 3;
+  for (u32 i = 0; i < 4; i++) {
+    g_gxState.tcgs[i].mtx = static_cast<GXTexMtx>(reg_get(value, 6, 6 + i * 6));
+  }
   g_gxState.xfRegValid.reset(0x18);
+}
+
+void cp_mtx_index_b(u8, u32 value) noexcept {
+  for (u32 i = 0; i < 4 && (i + 4) < MaxTexCoord; i++) {
+    g_gxState.tcgs[i + 4].mtx = static_cast<GXTexMtx>(reg_get(value, 6, i * 6));
+  }
+  g_gxState.xfRegValid.reset(0x19);
 }
 
 // VCD low (0x50)
@@ -725,8 +735,8 @@ void cp_array_stride(u8 addr, u32 value) noexcept {
 
 constexpr auto kCpRegs = [] {
   std::array<RegHandler, 0x100> regs{};
-  regs[0x30] = {cp_mtx_index, DirtyImmediates};
-  regs[0x40] = {}; // Matrix index B; mirrors XF 0x19
+  regs[0x30] = {cp_mtx_index, DirtyImmediates | DirtyPipeline};
+  regs[0x40] = {cp_mtx_index_b, DirtyPipeline};
   regs[0x50] = {cp_vcd_lo, DirtyPipeline};
   regs[0x60] = {cp_vcd_hi, DirtyPipeline};
   for (u8 i = 0; i < 8; ++i) {
@@ -774,14 +784,14 @@ void xf_chan_ctrl(u8 reg, u32 value) noexcept {
   u32 lightsLo = reg_get(value, 4, 2);
   chan.ambSrc = static_cast<GXColorSrc>(reg_get(value, 1, 6));
   chan.diffFn = static_cast<GXDiffuseFn>(reg_get(value, 2, 7));
-  // bit 9 = (attnFn != GX_AF_NONE), bit 10 = (attnFn != GX_AF_SPEC)
-  bool bit9 = reg_get(value, 1, 9) != 0;
-  bool bit10 = reg_get(value, 1, 10) != 0;
+  // Bit 9 enables attenuation, bit 10 selects spotlight over specular.
+  const bool attnEnable = reg_get(value, 1, 9) != 0;
+  const bool attnSelect = reg_get(value, 1, 10) != 0;
   u32 lightsHi = reg_get(value, 4, 11);
-  if (!bit10) {
-    chan.attnFn = GX_AF_SPEC;
-  } else if (!bit9) {
+  if (!attnEnable) {
     chan.attnFn = GX_AF_NONE;
+  } else if (!attnSelect) {
+    chan.attnFn = GX_AF_SPEC;
   } else {
     chan.attnFn = GX_AF_SPOT;
   }
@@ -807,6 +817,7 @@ void xf_mtx_index_b(u8, u32 value) noexcept {
   for (u32 i = 0; i < 4 && (i + 4) < MaxTexCoord; i++) {
     g_gxState.tcgs[i + 4].mtx = static_cast<GXTexMtx>(reg_get(value, 6, i * 6));
   }
+  g_gxState.cpRegValid.reset(0x40);
 }
 
 // numTexGens (0x3F)
