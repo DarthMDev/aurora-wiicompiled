@@ -148,7 +148,13 @@ void GXSetTevOrder(GXTevStageID id, GXTexCoordID tcid, GXTexMapID tmid, GXChanne
 
   u32 tmap = tmid & ~0x100u;
   tmap = (tmap >= GX_MAX_TEXMAP) ? GX_TEXMAP0 : tmap;
-  u32 tcoord = (tcid >= GX_MAX_TEXCOORD) ? GX_TEXCOORD0 : tcid;
+  const bool texCoordValid = tcid < GX_MAX_TEXCOORD;
+  if (texCoordValid) {
+    __gx->texmapValid |= 1u << id;
+  } else {
+    __gx->texmapValid &= ~(1u << id);
+  }
+  u32 tcoord = texCoordValid ? tcid : GX_TEXCOORD0;
   u32 chanHw = (cid == GX_COLOR_NULL) ? 7 : c2r[cid];
 
   if (id & 1) {

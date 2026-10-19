@@ -498,7 +498,7 @@ void __GXSetSUTexRegs() {
     } else {
       coord = GET_REG_FIELD(*ptref, 3, 3);
     }
-    if (tmap != 0xFF && !(__gx->tcsManEnab & (1 << coord))) {
+    if (tmap != 0xFF && !(__gx->tcsManEnab & (1 << coord)) && (__gx->texmapValid & (1u << i))) {
       __SetSURegs(tmap, coord);
     }
   }

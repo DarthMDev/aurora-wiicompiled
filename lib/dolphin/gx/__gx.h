@@ -135,6 +135,7 @@ struct __GXData_struct {
   u32 tImage0[8];   // texture image 0 registers
   u32 tMode0[8];    // texture mode 0 registers
   u32 texmapId[16]; // texture map ID tracking
+  u32 texmapValid;  // bitmask of TEV stages with a valid texture coordinate
 
   GXAttrType nrmType; // normal attribute type
   u8 hasNrms;       // has normal vectors
