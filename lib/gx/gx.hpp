@@ -177,7 +177,7 @@ struct TcgConfig {
   GXPTTexMtx postMtx = GX_PTIDENTITY;
   bool normalize = false;
   u8 embossSrc = 0; // Emboss source texcoord (GX_TG_BUMP*)
-  u8 _p2 = 0;
+  bool inputFormAB11 = false; // Source z is replaced by 1 before the matrix
   u8 _p3 = 0;
 
   bool operator==(const TcgConfig& rhs) const { return memcmp(this, &rhs, sizeof(*this)) == 0; }
@@ -394,6 +394,8 @@ struct GXState {
   u8 numIndStages = 0;
   u8 numTevStages = 0;
   u8 numTexGens = 0;
+  // XF 0x12: enables the post-transform matrix and normalization stage of texgens.
+  bool dualTex = false;
 
   // GX2 polygon offset state
   f32 frontOffset = 0.0f;
@@ -533,6 +535,17 @@ struct ShaderConfig {
   bool operator==(const ShaderConfig& rhs) const { return memcmp(this, &rhs, sizeof(*this)) == 0; }
 };
 static_assert(std::has_unique_object_representations_v<ShaderConfig>);
+
+// A stage's coordinate is also the base of the next stage when that stage adds the previous one.
+inline bool tev_stage_feeds_add_prev(const ShaderConfig& config, u32 stageIdx) noexcept {
+  return stageIdx + 1 < config.tevStageCount && config.tevStages[stageIdx + 1].indTexAddPrev;
+}
+
+inline bool tev_stage_uses_coord_state(const ShaderConfig& config, u32 stageIdx) noexcept {
+  const auto& stage = config.tevStages[stageIdx];
+  return stage.indTexMtxId != GX_ITM_OFF || stage.indTexWrapS != GX_ITW_OFF || stage.indTexWrapT != GX_ITW_OFF ||
+         stage.indTexAddPrev || tev_stage_feeds_add_prev(config, stageIdx);
+}
 
 struct PipelineConfig;
 struct PipelineOptions;

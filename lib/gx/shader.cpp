@@ -881,7 +881,12 @@ std::string vertex_color_attr(const ShaderConfig& config, u8 channel) {
 }
 
 auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8 i, bool alpha) -> std::string {
-  std::string_view swizzle = alpha ? ".a"sv : ""sv;
+  std::string_view swizzle = alpha ? ".a"sv : ".rgb"sv;
+  std::string_view intType = alpha ? "i32"sv : "vec3i"sv;
+  std::string_view intZero = alpha ? "0"sv : "vec3i(0)"sv;
+  std::string_view intMax = alpha ? "255"sv : "vec3i(255)"sv;
+  std::string_view shift7 = alpha ? "7u"sv : "vec3u(7u)"sv;
+  std::string_view shift8 = alpha ? "8u"sv : "vec3u(8u)"sv;
   std::string outVar = fmt::format("out.cc{}", i);
   std::string_view posVar = "mv_pos"sv;
   std::string_view nrmVar = "mv_nrm"sv;
@@ -901,7 +906,11 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8 
   }
 
   if (!cc.lightingEnabled) {
-    return fmt::format("\n    {0}{2} = {1}{2};", outVar, matSrc, swizzle);
+    // The XF lighting block consumes and produces 8-bit channel values even when lighting is disabled.
+    if (alpha) {
+      return fmt::format("\n    {0}.a = f32(i32(round({1}.a * 255.0))) / 255.0;", outVar, matSrc);
+    }
+    return fmt::format("\n    {0} = vec4f(vec3f(vec3i(round({1}.rgb * 255.0))) / 255.0, 1.0);", outVar, matSrc);
   }
 
   GXDiffuseFn diffFn = cc.diffFn;
@@ -916,15 +925,32 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8 
           var dist_attn = dot(light.dist_att, vec3f(1.0, dist, dist2));
           attn = max(0.0, cos_attn / dist_attn);)""");
   } else if (cc.attnFn == GX_AF_SPEC) {
-    std::string dist_attn = diffFn != GX_DF_NONE
-                                ? "max(0.0, dot(normalize(light.dist_att), vec3f(1.0, attn, attn * attn)));"
-                                : "max(0.0, dot(light.dist_att, vec3f(1.0, attn, attn * attn)));";
+    std::string dist_attn = diffFn != GX_DF_NONE ? "dot(normalize(light.dist_att), vec3f(1.0, attn, attn * attn))"
+                                                 : "dot(light.dist_att, vec3f(1.0, attn, attn * attn))";
+    // A zero distance term saturates rather than dividing by zero.
     lightAttnFn = fmt::format(R"""(
           attn = select(0.0, max(0.0, dot({0}, light.dir)), dot({0}, ldir) >= 0.0);
           var cos_attn = dot(light.cos_att, vec3f(1.0, attn, attn * attn));
           var dist_attn = {1};
-          attn = max(0.0, cos_attn / dist_attn);)""",
+          attn = select(select(0.0, 1.0, cos_attn > 0.0), max(0.0, cos_attn / dist_attn), dist_attn != 0.0);)""",
                               nrmVar, dist_attn);
+  }
+
+  std::string lightDirSetup;
+  if (cc.attnFn == GX_AF_NONE) {
+    lightDirSetup = fmt::format(R"""(
+          var ldir = light.pos - {0};
+          var dist2 = dot(ldir, ldir);
+          var dist = sqrt(dist2);
+          ldir = select({1}, ldir / max(dist, 1e-20), dist > 0.0);)""",
+                                posVar, nrmVar);
+  } else {
+    lightDirSetup = fmt::format(R"""(
+          var ldir = light.pos - {0};
+          var dist2 = dot(ldir, ldir);
+          var dist = sqrt(dist2);
+          ldir = ldir / dist;)""",
+                                posVar);
   }
 
   std::string_view lightDiffFn;
@@ -937,24 +963,27 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8 
     lightDiffFn = "max(0.0, dot(ldir, mv_nrm))"sv;
   }
 
+  // Accumulate and modulate in the hardware's 8-bit fixed point.
+  const auto outputTarget = alpha ? fmt::format("{}.a", outVar) : outVar;
+  const auto outputValue =
+      alpha ? fmt::format("f32((material * (lacc + (lacc >> {}))) >> {}) / 255.0", shift7, shift8)
+            : fmt::format("vec4f(vec3f((material * (lacc + (lacc >> {}))) >> {}) / 255.0, 1.0)", shift7, shift8);
   return fmt::format(R"""(
     {{
-      var lighting = {5};
+      var lighting = {8}(round({4}{6} * 255.0));
       for (var i = 0u; i < {1}u; i++) {{
-          if ((ubuf.lightState{0}{9} & (1u << i)) == 0u) {{ continue; }}
-          var light = ubuf.lights[i];
-          var ldir = light.pos - {6};
-          var dist2 = dot(ldir, ldir);
-          var dist = sqrt(dist2);
-          ldir = ldir / dist;
+          if ((ubuf.lightState{0}{7} & (1u << i)) == 0u) {{ continue; }}
+          var light = ubuf.lights[i];{5}
           var attn: f32;{2}
           var diff = {3};
-          lighting = lighting + (attn * diff * light.color);
+          lighting = lighting + {8}(round(attn * diff * light.color{6} * 255.0));
       }}
-      {7}{8} = ({4} * clamp(lighting, vec4f(0.0), vec4f(1.0))){8};
+      let lacc = clamp(lighting, {9}, {10});
+      let material = {8}(round({11}{6} * 255.0));
+      {12} = {13};
     }})""",
-                     i, GX::MaxLights, lightAttnFn, lightDiffFn, matSrc, ambSrc, posVar, outVar, swizzle,
-                     alpha ? "a"sv : ""sv);
+                     i, GX::MaxLights, lightAttnFn, lightDiffFn, ambSrc, lightDirSetup, swizzle,
+                     alpha ? "a"sv : ""sv, intType, intZero, intMax, matSrc, outputTarget, outputValue);
 }
 
 absl::flat_hash_set<gfx::ShaderRef> s_seenShaders;
@@ -1367,6 +1396,9 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
     } else {
       UNLIKELY FATAL("unhandled tcg src {}", underlying(tcg.src));
     }
+    if (tcg.inputFormAB11) {
+      vtxXfrAttrs += fmt::format("\n    tc{}.z = 1.0;", i);
+    }
 
     if (tcg.type == GX_TG_MTX2x4 || tcg.type == GX_TG_MTX3x4) {
       if (info.indexAttr.test(GX_VA_TEX0MTXIDX + i)) {
@@ -1396,6 +1428,14 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
       vtxXfrAttrs +=
           fmt::format("\n    var tc{0}_proj = vec4f(tc{0}_tmp.xyz, 1.0) * ubuf.postmtx[{1}];", i, postMtxIdx);
     }
+    if (tcg.type == GX_TG_MTX3x4) {
+      // A zero q leaves the coordinate unprojected; hardware clamps it instead of producing infinities.
+      vtxXfrAttrs += fmt::format("\n    if (tc{0}_proj.z == 0.0) {{"
+                                 "\n      tc{0}_proj.x = clamp(tc{0}_proj.x / 2.0, -1.0, 1.0);"
+                                 "\n      tc{0}_proj.y = clamp(tc{0}_proj.y / 2.0, -1.0, 1.0);"
+                                 "\n    }}",
+                                 i);
+    }
 
     // Apply line/point tex offset
     if (config.lineMode == 3) {
@@ -1417,7 +1457,11 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
 
     if (tcg.type == GX_TG_MTX3x4) {
       vtxXfrAttrs += fmt::format("\n    out.tex{0}_uvw = tc{0}_proj.xyz;", i);
-      fragmentFnPre += fmt::format("\n    var tex{0}_uv = in.tex{0}_uvw.xy / in.tex{0}_uvw.z;", i);
+      fragmentFnPre += fmt::format("\n    var tex{0}_uv = in.tex{0}_uvw.xy;"
+                                   "\n    if (in.tex{0}_uvw.z != 0.0) {{"
+                                   "\n      tex{0}_uv = in.tex{0}_uvw.xy / in.tex{0}_uvw.z;"
+                                   "\n    }}",
+                                   i);
     } else {
       vtxXfrAttrs += fmt::format("\n    out.tex{0}_uv = tc{0}_proj.xy;", i);
       fragmentFnPre += fmt::format("\n    var tex{0}_uv = in.tex{0}_uv.xy;", i);
@@ -1426,29 +1470,40 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
 
   // Multiple TEV stages may reference the same indirect stage,
   // so we sample each indirect texture only once.
-  const auto ind_scale = [](const GXIndTexScale s) -> std::string_view {
+  const auto ind_scale_shift = [](const GXIndTexScale s) -> u32 {
     switch (s) {
     case GX_ITS_1:
-      return "1.0"sv;
+      return 0;
     case GX_ITS_2:
-      return "(1.0 / 2.0)"sv;
+      return 1;
     case GX_ITS_4:
-      return "(1.0 / 4.0)"sv;
+      return 2;
     case GX_ITS_8:
-      return "(1.0 / 8.0)"sv;
+      return 3;
     case GX_ITS_16:
-      return "(1.0 / 16.0)"sv;
+      return 4;
     case GX_ITS_32:
-      return "(1.0 / 32.0)"sv;
+      return 5;
     case GX_ITS_64:
-      return "(1.0 / 64.0)"sv;
+      return 6;
     case GX_ITS_128:
-      return "(1.0 / 128.0)"sv;
+      return 7;
     case GX_ITS_256:
-      return "(1.0 / 256.0)"sv;
+      return 8;
     default:
       FATAL("unhandled indirect scale {}", underlying(s));
     }
+  };
+
+  // Texture coordinates in GX's S17.7 texel space.
+  std::array<bool, MaxTexCoord> emittedFixedTexCoord{};
+  const auto fixed_texcoord_name = [&](u32 texCoordId) {
+    if (!emittedFixedTexCoord[texCoordId]) {
+      fragmentFnPre += fmt::format(
+          "\n    let tex{0}_fixed_uv = vec2i(tex{0}_uv * ubuf.texcoord_scale[{0}].xy * 128.0);", texCoordId);
+      emittedFixedTexCoord[texCoordId] = true;
+    }
+    return fmt::format("tex{}_fixed_uv", texCoordId);
   };
 
   for (int i = 0; i < info.usedIndStages.size(); ++i) {
@@ -1459,29 +1514,28 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
     const auto& indStage = config.indStages[i];
     const u32 texCoordId = underlying(indStage.texCoordId);
     const u32 texMapId = underlying(indStage.texMapId);
-    // GX applies the SU texture-coordinate scale before the indirect stage scale.
-    // The shader carries normalized UVs, so convert that texel-space result back
-    // into normalized coordinates for the indirect texture sample.
-    const auto scaleExpr =
-        fmt::format("tex{0}_uv * ubuf.texcoord_scale[{0}].xy * vec2f({1}, {2}) / ubuf.tex{3}_size_bias.xy", texCoordId,
-                    ind_scale(indStage.scaleS), ind_scale(indStage.scaleT), texMapId);
+    const auto fixedUv = fixed_texcoord_name(texCoordId);
     fragmentFnPre += fmt::format(
         "\n    // Indirect stage {0}"
-        "\n    var t_IndTexCoord{0} = 255.0 * textureSampleBias(tex{1}, tex{1}_samp, {2}, "
-        "ubuf.tex{1}_size_bias.z).abg;",
-        i, texMapId, scaleExpr);
+        "\n    let ind{0}_sample_fixed = {2} >> vec2u({3}u, {4}u);"
+        "\n    var t_IndTexCoord{0} = round(255.0 * textureSampleBias(tex{1}, tex{1}_samp, "
+        "vec2f(ind{0}_sample_fixed) / (ubuf.tex{1}_size_bias.xy * 128.0), ubuf.tex{1}_size_bias.z).abg);",
+        i, texMapId, fixedUv, ind_scale_shift(indStage.scaleS), ind_scale_shift(indStage.scaleT));
   }
 
-  if (info.usedIndStages.any()) {
-    fragmentFnPre += "\n    var t_TexCoord = vec2f(0.0);";
+  bool usesCoordState = false;
+  for (u32 i = 0; i < config.tevStageCount; ++i) {
+    usesCoordState |= tev_stage_uses_coord_state(config, i);
+  }
+  if (usesCoordState) {
+    fragmentFnPre += "\n    var t_TexCoord = vec2i(0);";
   }
 
   for (int i = 0; i < config.tevStageCount; ++i) {
     const auto& stage = config.tevStages[i];
     const bool needsIndirectCoord = stage.indTexMtxId != GX_ITM_OFF;
     const bool hasIndirectStage = stage.indTexStage < config.numIndStages;
-    const bool needsTevTexCoord =
-        needsIndirectCoord || stage.indTexWrapS != GX_ITW_OFF || stage.indTexWrapT != GX_ITW_OFF || stage.indTexAddPrev;
+    const bool needsTevTexCoord = tev_stage_uses_coord_state(config, i);
     const bool needsTextureSample =
         uses_texture_sample(stage) || (config.zTextureOp != GX_ZT_DISABLE && i == config.tevStageCount - 1);
 
@@ -1489,172 +1543,143 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
       continue;
     }
 
-    const bool hasBaseTexCoord = stage.texCoordId != GX_TEXCOORD_NULL;
+    const bool hasBaseCoord = stage.texCoordId != GX_TEXCOORD_NULL;
     const bool hasBaseTexture = stage.texMapId != GX_TEXMAP_NULL;
-    const bool hasBaseCoord = hasBaseTexCoord && hasBaseTexture;
     std::string uvIn;
 
     if (needsTevTexCoord) {
       fragmentFnPre += fmt::format("\n    // TEV stage {} indirect", i);
 
-      // Apply indirect texture matrix (produces a texel-space offset)
-      std::string indirectOffsetTexel;
+      // Indirect offset in S17.7 texel space
+      std::string indirectOffset;
 
       if (needsIndirectCoord && hasIndirectStage) {
-        std::string_view fmtShift;
+        u32 fmtShift = 0;
 
         switch (stage.indTexFormat) {
         case GX_ITF_8:
           break;
         case GX_ITF_5:
-          fmtShift = " / 8.0"sv;
+          fmtShift = 3;
           break;
         case GX_ITF_4:
-          fmtShift = " / 16.0"sv;
+          fmtShift = 4;
           break;
         case GX_ITF_3:
-          fmtShift = " / 32.0"sv;
+          fmtShift = 5;
           break;
         default:
           FATAL("unhandled indirect format {}", underlying(stage.indTexFormat));
         }
 
-        if (fmtShift.empty()) {
-          fragmentFnPre += fmt::format("\n    var ind{0}_coord = t_IndTexCoord{1};", i, underlying(stage.indTexStage));
+        if (fmtShift == 0) {
+          fragmentFnPre +=
+              fmt::format("\n    var ind{0}_coord = vec3i(t_IndTexCoord{1});", i, underlying(stage.indTexStage));
         } else {
-          fragmentFnPre += fmt::format("\n    var ind{0}_coord = floor(t_IndTexCoord{1}{2});", i,
+          fragmentFnPre += fmt::format("\n    var ind{0}_coord = vec3i(t_IndTexCoord{1}) >> vec3u({2}u);", i,
                                        underlying(stage.indTexStage), fmtShift);
         }
 
         if (stage.indTexBiasSel != GX_ITB_NONE) {
-          auto bias = stage.indTexFormat == GX_ITF_8 ? "-128.0"sv : "1.0"sv;
-          auto biasS = "0.0"sv, biasT = "0.0"sv, biasU = "0.0"sv;
+          auto bias = stage.indTexFormat == GX_ITF_8 ? "-128"sv : "1"sv;
+          auto biasS = "0"sv, biasT = "0"sv, biasU = "0"sv;
 
           if (stage.indTexBiasSel == GX_ITB_S || stage.indTexBiasSel == GX_ITB_ST || stage.indTexBiasSel == GX_ITB_SU ||
               stage.indTexBiasSel == GX_ITB_STU) {
-            biasS = "1.0"sv;
+            biasS = "1"sv;
           }
 
           if (stage.indTexBiasSel == GX_ITB_T || stage.indTexBiasSel == GX_ITB_ST || stage.indTexBiasSel == GX_ITB_TU ||
               stage.indTexBiasSel == GX_ITB_STU) {
-            biasT = "1.0"sv;
+            biasT = "1"sv;
           }
 
           if (stage.indTexBiasSel == GX_ITB_U || stage.indTexBiasSel == GX_ITB_SU || stage.indTexBiasSel == GX_ITB_TU ||
               stage.indTexBiasSel == GX_ITB_STU) {
-            biasU = "1.0"sv;
+            biasU = "1"sv;
           }
 
-          fragmentFnPre += fmt::format("\n    ind{0}_coord = ind{0}_coord + vec3f({1}, {2}, {3}) * {4};", i, biasS,
+          fragmentFnPre += fmt::format("\n    ind{0}_coord = ind{0}_coord + vec3i({1}, {2}, {3}) * {4};", i, biasS,
                                        biasT, biasU, bias);
         }
 
+        const auto appendScaleShift = [&](u32 mtxIdx) {
+          fragmentFnPre += fmt::format(
+              "\n    let ind{0}_shift = ubuf.ind_mtx[{1}].z;"
+              "\n    if (ind{0}_shift >= 0) {{"
+              "\n      ind{0}_offset = ind{0}_offset >> vec2u(u32(ind{0}_shift));"
+              "\n    }} else {{"
+              "\n      ind{0}_offset = ind{0}_offset << vec2u(u32(-ind{0}_shift));"
+              "\n    }}",
+              i, mtxIdx * 2 + 1);
+          indirectOffset = fmt::format("ind{}_offset", i);
+        };
+
         if (stage.indTexMtxId >= GX_ITM_0 && stage.indTexMtxId <= GX_ITM_2) {
-          // Static 2x3 matrix: dot(mat_row, vec3(S,T,U)) * scale
           u32 mtxIdx = stage.indTexMtxId - GX_ITM_0;
           fragmentFnPre += fmt::format(
-              "\n    let ind{0}_c0 = ubuf.ind_mtx[{1}][0];"
-              "\n    let ind{0}_c1 = ubuf.ind_mtx[{1}][1];",
-              i, mtxIdx);
-          indirectOffsetTexel = fmt::format(
-              "vec2f("
-              "dot(vec3f(ind{0}_c0.xz, ind{0}_c1.x), ind{0}_coord), "
-              "dot(vec3f(ind{0}_c0.yw, ind{0}_c1.y), ind{0}_coord)"
-              ") * ind{0}_c1.z",
-              i);
+              "\n    let ind{0}_c0 = ubuf.ind_mtx[{1}];"
+              "\n    let ind{0}_c1 = ubuf.ind_mtx[{2}];"
+              "\n    var ind{0}_offset = vec2i("
+              "\n      (ind{0}_c0.x * ind{0}_coord.x + ind{0}_c0.z * ind{0}_coord.y + ind{0}_c1.x * ind{0}_coord.z) >> 3u,"
+              "\n      (ind{0}_c0.y * ind{0}_coord.x + ind{0}_c0.w * ind{0}_coord.y + ind{0}_c1.y * ind{0}_coord.z) >> 3u);",
+              i, mtxIdx * 2, mtxIdx * 2 + 1);
+          appendScaleShift(mtxIdx);
         } else if (stage.indTexMtxId >= GX_ITM_S0 && stage.indTexMtxId <= GX_ITM_S2 && hasBaseCoord) {
-          // Dynamic S: result = scaled texcoord * ind_coord.x * scale / 256
           u32 mtxIdx = stage.indTexMtxId - GX_ITM_S0;
-          u32 regTexCoord = underlying(stage.texCoordId);
-          indirectOffsetTexel = fmt::format(
-              "tex{1}_uv * ubuf.texcoord_scale[{1}].xy * ind{0}_coord.x"
-              " * ubuf.ind_mtx[{2}][1][2] / 256.0",
-              i, regTexCoord, mtxIdx);
+          fragmentFnPre += fmt::format("\n    var ind{0}_offset = ({1} * vec2i(ind{0}_coord.x)) >> vec2u(8u);", i,
+                                       fixed_texcoord_name(underlying(stage.texCoordId)));
+          appendScaleShift(mtxIdx);
         } else if (stage.indTexMtxId >= GX_ITM_T0 && stage.indTexMtxId <= GX_ITM_T2 && hasBaseCoord) {
-          // Dynamic T: result = scaled texcoord * ind_coord.y * scale / 256
           u32 mtxIdx = stage.indTexMtxId - GX_ITM_T0;
-          u32 regTexCoord = underlying(stage.texCoordId);
-          indirectOffsetTexel = fmt::format(
-              "tex{1}_uv * ubuf.texcoord_scale[{1}].xy * ind{0}_coord.y"
-              " * ubuf.ind_mtx[{2}][1][2] / 256.0",
-              i, regTexCoord, mtxIdx);
+          fragmentFnPre += fmt::format("\n    var ind{0}_offset = ({1} * vec2i(ind{0}_coord.y)) >> vec2u(8u);", i,
+                                       fixed_texcoord_name(underlying(stage.texCoordId)));
+          appendScaleShift(mtxIdx);
         }
       }
 
-      // Don't convert to/from texel space if we can avoid it
-      const bool useSimpleCoords = stage.indTexMtxId == GX_ITM_OFF && !stage.indTexAddPrev;
-
-      // Wrap base coord and combine with the indirect translation.
       auto wrap_comp = [](GXIndTexWrap wrap, std::string&& coord) -> std::string {
         switch (wrap) {
         case GX_ITW_OFF:
           return std::move(coord);
         case GX_ITW_256:
-          return fmt::format("({} % 256.0)", coord);
+          return fmt::format("({} & {})", coord, (256 << 7) - 1);
         case GX_ITW_128:
-          return fmt::format("({} % 128.0)", coord);
+          return fmt::format("({} & {})", coord, (128 << 7) - 1);
         case GX_ITW_64:
-          return fmt::format("({} % 64.0)", coord);
+          return fmt::format("({} & {})", coord, (64 << 7) - 1);
         case GX_ITW_32:
-          return fmt::format("({} % 32.0)", coord);
+          return fmt::format("({} & {})", coord, (32 << 7) - 1);
         case GX_ITW_16:
-          return fmt::format("({} % 16.0)", coord);
+          return fmt::format("({} & {})", coord, (16 << 7) - 1);
         case GX_ITW_0:
-          return "0.0";
+          return "0";
         default:
           FATAL("unhandled indirect wrap {}", underlying(wrap));
         }
       };
 
-      std::string baseCoordExpr;
-
-      if (hasBaseCoord) {
-        u32 texCoordId = underlying(stage.texCoordId);
-
-        if (useSimpleCoords) {
-          baseCoordExpr = fmt::format("tex{}_uv", texCoordId);
-        } else {
-          fragmentFnPre +=
-              fmt::format("\n    var ind{0}_texel = tex{1}_uv * ubuf.texcoord_scale[{1}].xy;", i, texCoordId);
-          baseCoordExpr = fmt::format("ind{}_texel", i);
-        }
+      const std::string baseCoordExpr =
+          hasBaseCoord ? fixed_texcoord_name(underlying(stage.texCoordId)) : std::string{"vec2i(0)"};
+      std::string finalCoord =
+          fmt::format("vec2i({}, {})", wrap_comp(stage.indTexWrapS, fmt::format("{}.x", baseCoordExpr)),
+                      wrap_comp(stage.indTexWrapT, fmt::format("{}.y", baseCoordExpr)));
+      if (!indirectOffset.empty()) {
+        finalCoord = fmt::format("{} + {}", finalCoord, indirectOffset);
       }
 
-      std::string wrappedExpr = baseCoordExpr;
-
-      if (!baseCoordExpr.empty() && (stage.indTexWrapS != GX_ITW_OFF || stage.indTexWrapT != GX_ITW_OFF)) {
-        wrappedExpr = fmt::format("vec2f({}, {})", wrap_comp(stage.indTexWrapS, fmt::format("{}.x", baseCoordExpr)),
-                                  wrap_comp(stage.indTexWrapT, fmt::format("{}.y", baseCoordExpr)));
-      }
-
-      std::string finalCoord;
-
-      if (!wrappedExpr.empty() && !indirectOffsetTexel.empty()) {
-        finalCoord = fmt::format("{} + ({})", wrappedExpr, indirectOffsetTexel);
-      } else if (!wrappedExpr.empty()) {
-        finalCoord = wrappedExpr;
+      if (stage.indTexAddPrev) {
+        fragmentFnPre += fmt::format("\n    t_TexCoord += {};", finalCoord);
       } else {
-        finalCoord = indirectOffsetTexel;
+        fragmentFnPre += fmt::format("\n    t_TexCoord = {};", finalCoord);
       }
+      // Coordinates wrap at 24 bits
+      fragmentFnPre += "\n    t_TexCoord = (t_TexCoord << vec2u(8u)) >> vec2u(8u);";
 
-      if (info.usedIndStages.any() && !finalCoord.empty()) {
-        if (stage.indTexAddPrev) {
-          fragmentFnPre += fmt::format("\n    t_TexCoord += {};", finalCoord);
-        } else {
-          fragmentFnPre += fmt::format("\n    t_TexCoord = {};", finalCoord);
-        }
-
-        if (needsTextureSample && hasBaseTexture) {
-          u32 texMapId = underlying(stage.texMapId);
-
-          if (useSimpleCoords) {
-            fragmentFnPre += fmt::format("\n    var ind{0}_uv = t_TexCoord;", i);
-          } else {
-            fragmentFnPre += fmt::format("\n    var ind{0}_uv = t_TexCoord / ubuf.tex{1}_size_bias.xy;", i, texMapId);
-          }
-
-          uvIn = fmt::format("ind{0}_uv", i);
-        }
+      if (needsTextureSample && hasBaseTexture) {
+        fragmentFnPre += fmt::format("\n    var ind{0}_uv = vec2f(t_TexCoord) / (ubuf.tex{1}_size_bias.xy * 128.0);",
+                                     i, underlying(stage.texMapId));
+        uvIn = fmt::format("ind{0}_uv", i);
       }
     }
 
@@ -1773,7 +1798,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
   uniBufAttrs += fmt::format("\n    texcoord_scale: array<vec4f, {}>,", MaxTexCoord);
 
   if (info.usedIndTexMtxs.any()) {
-    uniBufAttrs += fmt::format("\n    ind_mtx: array<mat2x4f, {}>,", MaxIndTexMtxs);
+    uniBufAttrs += fmt::format("\n    ind_mtx: array<vec4i, {}>,", MaxIndTexMtxs * 2);
   }
 
   for (int i = 0; i < info.sampledTextures.size(); ++i) {

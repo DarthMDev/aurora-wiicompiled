@@ -829,6 +829,9 @@ void xf_mtx_index_b(u8, u32 value) noexcept {
   g_gxState.cpRegValid.reset(0x40);
 }
 
+// Dual texture transform enable (0x12)
+void xf_dual_tex(u8, u32 value) noexcept { g_gxState.dualTex = (value & 1) != 0; }
+
 // numTexGens (0x3F)
 void xf_num_texgens(u8, u32 value) noexcept {
   g_gxState.numTexGens = value;
@@ -843,6 +846,7 @@ void xf_texgen(u8 reg, u32 value) noexcept {
   }
   auto& tcg = g_gxState.tcgs[tcIdx];
   bool proj = reg_get(value, 1, 1) != 0;
+  tcg.inputFormAB11 = reg_get(value, 1, 2) == 0;
   u32 tgType = reg_get(value, 3, 4);
   u32 srcRow = reg_get(value, 5, 7);
 
@@ -905,6 +909,7 @@ constexpr auto kXfRegs = [] {
   for (u8 r = 0x1A; r <= 0x26; ++r) {
     regs[r] = {};
   }
+  regs[0x12] = {xf_dual_tex, DirtyPipeline};
   regs[0x3F] = {xf_num_texgens, DirtyPipeline};
   for (u8 r = 0x40; r <= 0x4F; ++r) {
     regs[r] = {xf_texgen, DirtyPipeline};

@@ -3,10 +3,47 @@
 #include "../gfx/recording.hpp"
 
 #include <cmath>
+#include <cstring>
 
 #include <tracy/Tracy.hpp>
 
 namespace aurora::gx {
+namespace {
+// Maps Inf to a unit component and NaN to zero; std::isnan may be folded away under fast-math.
+float sanitize_light_dir_component(float value) noexcept {
+  u32 bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  if ((bits & 0x7f800000u) != 0x7f800000u) {
+    return value;
+  }
+  if ((bits & 0x007fffffu) != 0) {
+    return 0.0f;
+  }
+  return (bits & 0x80000000u) != 0 ? -1.0f : 1.0f;
+}
+
+// Keeps the shader's attenuation divisions finite and its light direction normalized.
+Light prepare_shader_light(Light light) noexcept {
+  if (std::fabs(light.distAtt[0]) < 0.00001f && std::fabs(light.distAtt[1]) < 0.00001f &&
+      std::fabs(light.distAtt[2]) < 0.00001f) {
+    light.distAtt[0] = 0.00001f;
+  }
+  const double normSq = static_cast<double>(light.dir[0]) * light.dir[0] +
+                        static_cast<double>(light.dir[1]) * light.dir[1] +
+                        static_cast<double>(light.dir[2]) * light.dir[2];
+  if (normSq == 0.0) {
+    light.dir[0] = 0.0f;
+    light.dir[1] = 0.0f;
+    light.dir[2] = 0.0f;
+    return light;
+  }
+  const double invNorm = 1.0 / std::sqrt(normSq);
+  light.dir[0] = sanitize_light_dir_component(static_cast<float>(light.dir[0] * invNorm));
+  light.dir[1] = sanitize_light_dir_component(static_cast<float>(light.dir[1] * invNorm));
+  light.dir[2] = sanitize_light_dir_component(static_cast<float>(light.dir[2] * invNorm));
+  return light;
+}
+} // namespace
 namespace {
 constexpr Module Log{"aurora::gx"};
 
@@ -263,16 +300,15 @@ ShaderInfo build_shader_info(const ShaderConfig& config) noexcept {
   }
   for (int i = 0; i < config.tevStageCount; ++i) {
     const auto& stage = config.tevStages[i];
+    const bool usesTevTexCoord = tev_stage_uses_coord_state(config, i);
+    if (usesTevTexCoord && stage.texCoordId != GX_TEXCOORD_NULL) {
+      info.sampledTexCoords.set(stage.texCoordId);
+    }
     // Skip if not enabled
     if (stage.indTexStage >= config.numIndStages) {
       continue;
     }
     const bool usesIndStage = stage.indTexMtxId != GX_ITM_OFF || is_alpha_bump_channel(stage.channelId);
-    const bool usesTevTexCoord = stage.indTexMtxId != GX_ITM_OFF || stage.indTexWrapS != GX_ITW_OFF ||
-                                 stage.indTexWrapT != GX_ITW_OFF || stage.indTexAddPrev;
-    if (usesTevTexCoord && stage.texCoordId != GX_TEXCOORD_NULL) {
-      info.sampledTexCoords.set(stage.texCoordId);
-    }
     if (usesTevTexCoord && stage.texMapId != GX_TEXMAP_NULL &&
         (stage.indTexMtxId != GX_ITM_OFF || stage.indTexAddPrev)) {
       info.sampledTextures.set(stage.texMapId);
@@ -427,7 +463,9 @@ static void fill_uniform(ByteBuffer& buf, const ShaderInfo& info) noexcept {
   if (info.lightingEnabled) {
     // Lights
     static_assert(sizeof(g_gxState.lights) == 80 * GX::MaxLights);
-    buf.append(g_gxState.lights);
+    for (const auto& light : g_gxState.lights) {
+      buf.append(prepare_shader_light(light));
+    }
     // Light state for all channels
     for (int i = 0; i < 4; ++i) {
       buf.append<u32>(g_gxState.colorChannelState[i].lightMask.to_ulong());
@@ -493,8 +531,11 @@ static void fill_uniform(ByteBuffer& buf, const ShaderInfo& info) noexcept {
   if (info.usedIndTexMtxs.any()) {
     for (u32 i = 0; i < MaxIndTexMtxs; ++i) {
       const auto& mtx = g_gxState.indTexMtxs[i];
-      buf.append(Vec4{mtx.mtx.m0.x, mtx.mtx.m0.y, mtx.mtx.m1.x, mtx.mtx.m1.y});
-      buf.append(Vec4{mtx.mtx.m2.x, mtx.mtx.m2.y, std::exp2f(mtx.scaleExp), 0.0f});
+      // S0.10 mantissas; z is the shift applied after the >> 3
+      const auto mantissa = [](float v) { return static_cast<s32>(std::lround(v * 1024.0f)); };
+      buf.append(Vec4<s32>{mantissa(mtx.mtx.m0.x), mantissa(mtx.mtx.m0.y), mantissa(mtx.mtx.m1.x),
+                           mantissa(mtx.mtx.m1.y)});
+      buf.append(Vec4<s32>{mantissa(mtx.mtx.m2.x), mantissa(mtx.mtx.m2.y), -static_cast<s32>(mtx.scaleExp), 0});
     }
   }
   for (int i = 0; i < info.sampledTextures.size(); ++i) {

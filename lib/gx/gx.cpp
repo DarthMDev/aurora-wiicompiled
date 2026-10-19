@@ -624,6 +624,10 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
     if (tcg.type < GX_TG_BUMP0 || tcg.type > GX_TG_BUMP7) {
       tcg.embossSrc = 0;
     }
+    if (!g_gxState.dualTex) {
+      tcg.postMtx = GX_PTIDENTITY;
+      tcg.normalize = false;
+    }
   }
   if (g_gxState.alphaCompare) {
     config.shaderConfig.alphaCompare = g_gxState.alphaCompare;
