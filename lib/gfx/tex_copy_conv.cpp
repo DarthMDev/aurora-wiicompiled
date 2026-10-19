@@ -330,12 +330,12 @@ static constexpr std::string_view FragZ8L = R"(
 }
 )"sv;
 
-// GX_TF_Z16 selects the depth RA8 copy format: alpha 255 and the high Z byte, so sampling as IA8
-// gives high Z as intensity. The middle and low depth bytes are not stored.
+// GX_TF_Z16: Upper 16 bits of depth -> IA8 (I = Z[23:16], A = Z[15:8])
 static constexpr std::string_view FragZ16 = R"(
 @fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    let i = z_byte(gx_z24(in.uv), 16u);
-    return vec4f(i, i, i, 1.0);
+    let z24 = gx_z24(in.uv);
+    let i = z_byte(z24, 16u);
+    return vec4f(i, i, i, z_byte(z24, 8u));
 }
 )"sv;
 
@@ -603,7 +603,7 @@ void initialize() {
       },
       wgpu::BindGroupLayoutEntry{
           .binding = 1,
-          .visibility = wgpu::ShaderStage::Vertex,
+          .visibility = wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Fragment,
           .buffer =
               wgpu::BufferBindingLayout{
                   .type = wgpu::BufferBindingType::Uniform,
