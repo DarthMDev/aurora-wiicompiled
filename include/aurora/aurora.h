@@ -152,6 +152,18 @@ const AuroraEvent* aurora_update();
 bool aurora_begin_frame();
 void aurora_end_frame();
 
+// aurora_begin_frame/aurora_end_frame split for a GX producer running on its own thread. The
+// window halves stay on the thread that owns the window and ImGui; the GX halves run on the
+// producer thread.
+typedef struct AuroraImguiFrame AuroraImguiFrame;
+bool aurora_begin_frame_window();
+bool aurora_begin_frame_gx();
+AuroraImguiFrame* aurora_end_frame_window();
+// Takes ownership of frame.
+void aurora_end_frame_gx(AuroraImguiFrame* frame);
+// Frees a frame that will not be ended.
+void aurora_release_imgui_frame(AuroraImguiFrame* frame);
+
 typedef void (*AuroraFrameWorkerWaitCallback)();
 // Called from the producer thread at bounded intervals while Aurora blocks on rendering.
 // The callback must not enter Aurora.

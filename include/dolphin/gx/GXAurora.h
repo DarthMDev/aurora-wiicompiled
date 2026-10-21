@@ -180,6 +180,12 @@ void AuroraGetRenderSize(u32* width, u32* height);
 void AuroraGetSurfaceSize(u32* width, u32* height);
 
 /**
+ * Marks the calling thread as the GX producer when it is not the main thread, so GX resource
+ * destructions it issues stay in command-stream order.
+ */
+void AuroraSetGxProducerThread(void);
+
+/**
  * Applies a raw BP register write in command-stream order.
  */
 void GXApplyBPReg(u8 reg, u32 value);

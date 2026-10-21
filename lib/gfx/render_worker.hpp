@@ -12,6 +12,8 @@
 #include <thread>
 #include <vector>
 
+#include "../thread.hpp"
+
 namespace aurora::gfx::render_worker {
 
 enum class ItemType : uint8_t {
@@ -101,7 +103,7 @@ void wait_servicing(std::condition_variable& cv, std::unique_lock<std::mutex>& l
     cv.wait(lock, pred);
     return;
   }
-  while (!cv.wait_for(lock, std::chrono::milliseconds{1}, pred)) {
+  while (!thread::wait_for(cv, lock, std::chrono::milliseconds{1}, pred)) {
     lock.unlock();
     service_producer_wait();
     lock.lock();

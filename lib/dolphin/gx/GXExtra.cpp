@@ -13,6 +13,7 @@ struct Destruction {
 
 std::mutex sDestructionMutex;
 std::vector<Destruction> sDestructions;
+thread_local bool sGxProducerThread = false;
 
 void emitDestruction(const Destruction& entry) {
   GX_WRITE_AURORA(entry.command);
@@ -31,7 +32,7 @@ void destroyResource(u16 command, u64 resource) {
 
   const Destruction entry{command, resource};
 
-  if (SDL_IsMainThread()) {
+  if (SDL_IsMainThread() || sGxProducerThread) {
     emitDestruction(entry);
   } else {
     // Loading/heap cleanup threads must not write to the main thread's GX FIFO.
@@ -55,6 +56,8 @@ void aurora::gx::flush_texture_destructions() {
 }
 
 extern "C" {
+void AuroraSetGxProducerThread() { sGxProducerThread = true; }
+
 void GXDestroyTexObj(GXTexObj* obj_) {
   auto* obj = reinterpret_cast<GXTexObj_*>(obj_);
   destroyResource(GX_AURORA_DESTROY_TEXOBJ, obj->texObjId);

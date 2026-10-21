@@ -295,4 +295,18 @@ void set_current(const Options& options) noexcept {
   }
 }
 
+void wait_once(std::condition_variable& cv, std::unique_lock<std::mutex>& lock,
+               std::chrono::nanoseconds timeout) noexcept {
+#if defined(_WIN32) && defined(_LIBCPP_VERSION)
+  static_assert(sizeof(*cv.native_handle()) == sizeof(CONDITION_VARIABLE));
+  static_assert(sizeof(*lock.mutex()->native_handle()) == sizeof(SRWLOCK));
+  const auto ms = std::max<int64_t>(std::chrono::ceil<std::chrono::milliseconds>(timeout).count(), 1);
+  SleepConditionVariableSRW(reinterpret_cast<PCONDITION_VARIABLE>(cv.native_handle()),
+                            reinterpret_cast<PSRWLOCK>(lock.mutex()->native_handle()),
+                            static_cast<DWORD>(std::min<int64_t>(ms, INFINITE - 1)), 0);
+#else
+  cv.wait_for(lock, timeout);
+#endif
+}
+
 } // namespace aurora::thread

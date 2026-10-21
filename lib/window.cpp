@@ -12,6 +12,9 @@
 
 #include <aurora/aurora.h>
 #include <aurora/event.h>
+
+#include <mutex>
+#include <optional>
 #include <aurora/gfx.h>
 #include <aurora/render_size_limits.hpp>
 #include <SDL3/SDL_error.h>
@@ -56,9 +59,9 @@ constexpr Module Log{"aurora::window"};
 SDL_Window* g_window;
 SDL_Renderer* g_renderer;
 float g_frameBufferScale = 0.f;
-bool g_frameBufferAspectFit = true;
+std::atomic_bool g_frameBufferAspectFit = true;
 std::atomic_bool g_forceAspect169{false};
-bool g_presentSurfaceFill = false;
+std::atomic_bool g_presentSurfaceFill = false;
 int g_presentAspectWidth = 0;
 int g_presentAspectHeight = 0;
 AuroraWindowSize g_windowSize;
@@ -66,6 +69,10 @@ std::vector<AuroraEvent> g_events;
 std::deque<std::string> g_eventStrings;
 std::atomic_bool g_backgrounded = false;
 std::atomic_bool g_nativeResizePending = false;
+// Render-target changes requested by window events, applied by the GX producer at frame begin.
+std::mutex g_pendingSurfaceMutex;
+std::optional<AuroraWindowSize> g_pendingSwapchainSize;
+std::atomic_bool g_pendingSurfaceRefresh = false;
 std::atomic<AuroraDisplayMode> g_displayMode{AURORA_DISPLAY_MODE_WINDOWED};
 #if defined(SDL_PLATFORM_ANDROID)
 std::atomic_bool g_surfaceReady = false;
@@ -261,9 +268,30 @@ void resize_swapchain() noexcept {
     SDL_SetRenderScale(g_renderer, size.scale, size.scale);
   }
 #ifdef AURORA_ENABLE_GX
-  webgpu::resize_swapchain(size.fb_width, size.fb_height, size.native_fb_width, size.native_fb_height);
+  std::lock_guard lock{g_pendingSurfaceMutex};
+  g_pendingSwapchainSize = size;
 #endif
 }
+
+} // namespace
+
+void apply_pending_surface_changes() noexcept {
+#ifdef AURORA_ENABLE_GX
+  std::optional<AuroraWindowSize> size;
+  {
+    std::lock_guard lock{g_pendingSurfaceMutex};
+    size.swap(g_pendingSwapchainSize);
+  }
+  if (size) {
+    webgpu::resize_swapchain(size->fb_width, size->fb_height, size->native_fb_width, size->native_fb_height);
+  }
+  if (g_pendingSurfaceRefresh.exchange(false, std::memory_order_acq_rel)) {
+    webgpu::refresh_surface(false);
+  }
+#endif
+}
+
+namespace {
 
 void set_window_icon() noexcept {
   if (g_config.iconRGBA8 == nullptr) {
@@ -458,9 +486,7 @@ void process_event(SDL_Event& event) {
       });
     } else if (event.type == g_sdlCustomEventsStart + CustomEvent::RefreshSurface) {
       // Refresh surface (vsync changed)
-#ifdef AURORA_ENABLE_GX
-      webgpu::refresh_surface(false);
-#endif
+      g_pendingSurfaceRefresh.store(true, std::memory_order_release);
     }
     break;
   }
@@ -678,7 +704,7 @@ AuroraWindowSize get_window_size() {
       fb_h = std::min(native_fb_h,
                       std::max(1, static_cast<int>(std::lround(native_fb_w * (9.f / 16.f)))));
     }
-  } else if (g_frameBufferAspectFit && baseW > 0 && baseH > 0) {
+  } else if (g_frameBufferAspectFit.load(std::memory_order_acquire) && baseW > 0 && baseH > 0) {
     float renderScale = g_frameBufferScale > 0.f ? g_frameBufferScale : 1.f;
     if (g_frameBufferScale <= 0.f) {
       renderScale = std::min(static_cast<float>(native_fb_w) / static_cast<float>(baseW),
@@ -885,11 +911,10 @@ void set_frame_buffer_scale(float scale) {
 }
 
 void set_frame_buffer_aspect_fit(bool fit) {
-  if (g_frameBufferAspectFit == fit) {
+  if (g_frameBufferAspectFit.exchange(fit, std::memory_order_acq_rel) == fit) {
     return;
   }
 
-  g_frameBufferAspectFit = fit;
   request_frame_buffer_resize();
 }
 
@@ -902,7 +927,7 @@ void set_force_aspect_16_9(bool force) {
 }
 
 void set_present_surface_fill(bool fill) {
-  g_presentSurfaceFill = fill;
+  g_presentSurfaceFill.store(fill, std::memory_order_release);
 }
 
 void lock_present_aspect_ratio(int width, int height) {
@@ -927,7 +952,7 @@ bool get_present_aspect_ratio(float& aspect) noexcept {
     aspect = 16.f / 9.f;
     return true;
   }
-  if (g_presentSurfaceFill && g_window != nullptr) {
+  if (g_presentSurfaceFill.load(std::memory_order_acquire) && g_window != nullptr) {
     // Queried once per presentation snapshot; use the cached native client size
     // instead of re-entering SDL for a value the window procedure already knows.
     uint32_t nativeWidth = 0;

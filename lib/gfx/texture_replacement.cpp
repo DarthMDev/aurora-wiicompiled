@@ -1916,7 +1916,7 @@ void set_worker_count(uint32_t count) noexcept {
 
 bool wait_for_completions(uint64_t id, uint32_t count, uint32_t timeoutMs) noexcept {
   std::unique_lock lock{s_jobMutex};
-  return s_jobCv.wait_for(lock, std::chrono::milliseconds{timeoutMs}, [id, count] {
+  return thread::wait_for(s_jobCv, lock, std::chrono::milliseconds{timeoutMs}, [id, count] {
     return std::count_if(s_workerCompletions.begin(), s_workerCompletions.end(),
                          [id](const LoadCompletion& completion) { return completion.entry.id == id; }) >= count;
   });

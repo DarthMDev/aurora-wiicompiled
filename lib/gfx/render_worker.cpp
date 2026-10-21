@@ -101,7 +101,7 @@ bool BoundedQueue::push(QueueItem item) {
 
 std::optional<QueueItem> BoundedQueue::pop_for(std::chrono::milliseconds timeout, bool& closed) {
   std::unique_lock lock{m_mutex};
-  m_notEmpty.wait_for(lock, timeout, [&] { return m_closed || !m_items.empty(); });
+  thread::wait_for(m_notEmpty, lock, timeout, [&] { return m_closed || !m_items.empty(); });
   closed = m_closed && m_items.empty();
   if (m_items.empty()) {
     return std::nullopt;
@@ -279,7 +279,7 @@ bool synchronize_for(std::chrono::microseconds timeout) {
       .sync = sync,
   });
   std::unique_lock lock{sync->mutex};
-  return sync->cv.wait_for(lock, timeout, [&] { return sync->complete; });
+  return thread::wait_for(sync->cv, lock, timeout, [&] { return sync->complete; });
 }
 
 bool is_worker_thread() noexcept { return g_workerThreadId == std::this_thread::get_id(); }

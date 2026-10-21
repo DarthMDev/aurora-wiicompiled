@@ -319,15 +319,12 @@ const AuroraEvent* update() noexcept {
     g_initialFrame = false;
     gamepad::initialize();
   }
-#ifdef AURORA_ENABLE_GX
-  gx::update();
-#endif
   const auto* events = window::poll_events();
   gamepad::update();
   return events;
 }
 
-bool begin_frame() noexcept {
+bool begin_frame_window() noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
   {
@@ -350,7 +347,15 @@ bool begin_frame() noexcept {
   }
 
   imgui::new_frame(window::get_window_size());
+#endif
+  return true;
+}
 
+bool begin_frame_gx() noexcept {
+  ZoneScoped;
+#ifdef AURORA_ENABLE_GX
+  gx::update();
+  window::apply_pending_surface_changes();
   if (!gfx::begin_frame()) {
     return false;
   }
@@ -361,7 +366,9 @@ bool begin_frame() noexcept {
   return true;
 }
 
-void end_frame() noexcept {
+bool begin_frame() noexcept { return begin_frame_window() && begin_frame_gx(); }
+
+void end_frame_gx(imgui::DrawData imguiDrawData) noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
   gx::flush_texture_destructions();
@@ -369,7 +376,6 @@ void end_frame() noexcept {
   gx::fifo::end_frame();
   gx::texture::end_frame();
   gfx::finish();
-  auto imguiDrawData = imgui::freeze();
 
   // A display copy (the XFB) is what reaches the screen; post-copy EFB draws must not leak in.
   webgpu::TextureWithSampler presentSource = webgpu::present_source();
@@ -632,8 +638,18 @@ void end_frame() noexcept {
 
 #endif
 }
+
+void end_frame() noexcept {
+#ifdef AURORA_ENABLE_GX
+  end_frame_gx(imgui::freeze());
+#endif
+}
 } // namespace
 } // namespace aurora
+
+struct AuroraImguiFrame {
+  aurora::imgui::DrawData drawData;
+};
 
 // C API bindings
 AuroraInfo aurora_initialize(int argc, char* argv[], const AuroraConfig* config) {
@@ -647,6 +663,25 @@ const AuroraEvent* aurora_update() { return aurora::update(); }
 bool aurora_begin_frame() { return aurora::begin_frame(); }
 
 void aurora_end_frame() { aurora::end_frame(); }
+
+bool aurora_begin_frame_window() { return aurora::begin_frame_window(); }
+
+bool aurora_begin_frame_gx() { return aurora::begin_frame_gx(); }
+
+AuroraImguiFrame* aurora_end_frame_window() {
+#ifdef AURORA_ENABLE_GX
+  return new AuroraImguiFrame{aurora::imgui::freeze()};
+#else
+  return nullptr;
+#endif
+}
+
+void aurora_release_imgui_frame(AuroraImguiFrame* frame) { delete frame; }
+
+void aurora_end_frame_gx(AuroraImguiFrame* frame) {
+  std::unique_ptr<AuroraImguiFrame> owned{frame};
+  aurora::end_frame_gx(owned ? std::move(owned->drawData) : aurora::imgui::DrawData{});
+}
 
 SDL_Window* aurora_get_window() { return aurora::window::get_sdl_window(); }
 
