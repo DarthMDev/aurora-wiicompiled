@@ -1764,7 +1764,11 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
 
     switch (config.fogType) {
       DEFAULT_FATAL("invalid fog type {}", config.fogType);
+    case static_cast<GXFogType>(1):
+    case static_cast<GXFogType>(3):
     case GX_FOG_PERSP_LIN:
+    case static_cast<GXFogType>(9):
+    case static_cast<GXFogType>(11):
     case GX_FOG_ORTHO_LIN:
       fragmentFn += "\n    var fogZ = fogF;";
       break;
