@@ -222,13 +222,16 @@ void new_frame(const AuroraWindowSize& size) noexcept {
     ImGui_ImplSDLRenderer3_NewFrame();
     g_scale = size.scale;
   } else {
+    // The render worker may still be drawing the last frozen frame with the old device objects.
     if (g_scale != size.scale) {
       if (g_scale > 0.f) {
+        gfx::render_worker::synchronize();
         ImGui_ImplWGPU_CreateDeviceObjects();
       }
       g_scale = size.scale;
     }
     if (!ImGui::GetIO().Fonts->IsBuilt()) {
+      gfx::render_worker::synchronize();
       ImGui_ImplWGPU_CreateDeviceObjects();
     }
     ImGui_ImplWGPU_NewFrame();
