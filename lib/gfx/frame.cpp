@@ -794,12 +794,15 @@ void end_frame(EndFrameCallback callback) {
     auto encoder = std::move(packet.encoder);
     const auto stats = packet.stats;
     auto afterSubmitCallbacks = std::move(packet.afterSubmitCallbacks);
+    // Slots may be skipped, so the first one actually encoded uploads the staging data.
+    bool stagingCopied = false;
     const InterpolationReplay replay{
         .slots = interpolationSlots,
         .encode =
-            [&packet](wgpu::CommandEncoder& cmd, uint32_t slot) {
-              if (slot == 0) {
+            [&packet, &stagingCopied](wgpu::CommandEncoder& cmd, uint32_t slot) {
+              if (!stagingCopied) {
                 detail::encode_full_staging_copy(cmd, packet);
+                stagingCopied = true;
               }
               gx::g_interpolationEncodeSlot = static_cast<int>(slot);
               for (const auto& op : packet.ops) {

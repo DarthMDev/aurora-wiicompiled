@@ -242,17 +242,14 @@ wgpu::PresentMode select_present_mode(const wgpu::SurfaceCapabilities& capabilit
     return false;
   };
   if (vsync_enabled()) {
-    if (supports(wgpu::PresentMode::FifoRelaxed)) {
-      return wgpu::PresentMode::FifoRelaxed;
-    }
-  } else {
-    // Dawn only disables CAMetalLayer displaySyncEnabled for Immediate on Metal
-    if (g_backendType != wgpu::BackendType::Metal && supports(wgpu::PresentMode::Mailbox)) {
-      return wgpu::PresentMode::Mailbox;
-    }
-    if (supports(wgpu::PresentMode::Immediate)) {
-      return wgpu::PresentMode::Immediate;
-    }
+    return wgpu::PresentMode::Fifo;
+  }
+  // Dawn only disables CAMetalLayer displaySyncEnabled for Immediate on Metal
+  if (g_backendType != wgpu::BackendType::Metal && supports(wgpu::PresentMode::Mailbox)) {
+    return wgpu::PresentMode::Mailbox;
+  }
+  if (supports(wgpu::PresentMode::Immediate)) {
+    return wgpu::PresentMode::Immediate;
   }
   return wgpu::PresentMode::Fifo;
 }
@@ -1204,6 +1201,11 @@ static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t 
   }
   g_graphicsConfig.surfaceConfiguration.width = nativeWidth;
   g_graphicsConfig.surfaceConfiguration.height = nativeHeight;
+  if (const auto presentMode = select_present_mode(g_surfaceCapabilities);
+      presentMode != g_graphicsConfig.surfaceConfiguration.presentMode) {
+    Log.info("Using present mode {}", magic_enum::enum_name(presentMode));
+    g_graphicsConfig.surfaceConfiguration.presentMode = presentMode;
+  }
   auto surfaceConfiguration = g_graphicsConfig.surfaceConfiguration;
   surfaceConfiguration.device = g_device;
   {
@@ -1263,7 +1265,5 @@ void resize_swapchain(uint32_t width, uint32_t height, uint32_t nativeWidth, uin
 
 void aurora_enable_vsync(const bool enabled) {
   aurora::webgpu::g_vsyncEnabled.store(enabled, std::memory_order_release);
-  aurora::webgpu::g_graphicsConfig.surfaceConfiguration.presentMode =
-      aurora::webgpu::select_present_mode(aurora::webgpu::g_surfaceCapabilities);
   aurora::window::push_custom_event(aurora::window::CustomEvent::RefreshSurface);
 }

@@ -183,6 +183,10 @@ void aurora_set_pause_on_focus_lost(bool value);
 void aurora_set_background_input(bool value);
 void aurora_set_display_mode(AuroraDisplayMode mode);
 AuroraDisplayMode aurora_get_display_mode();
+// Refresh rate of the display showing the window in Hz, or 0 when unknown.
+double aurora_get_display_refresh_rate();
+// False when the display is too slow to show interpolated frames, which are then dropped.
+bool aurora_display_shows_interpolation();
 
 typedef enum {
   AURORA_METALFX_DISABLED,

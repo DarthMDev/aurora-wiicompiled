@@ -74,6 +74,7 @@ std::mutex g_pendingSurfaceMutex;
 std::optional<AuroraWindowSize> g_pendingSwapchainSize;
 std::atomic_bool g_pendingSurfaceRefresh = false;
 std::atomic<AuroraDisplayMode> g_displayMode{AURORA_DISPLAY_MODE_WINDOWED};
+std::atomic_uint64_t g_refreshPeriodNanos = 0;
 #if defined(SDL_PLATFORM_ANDROID)
 std::atomic_bool g_surfaceReady = false;
 #else
@@ -251,7 +252,21 @@ Vec2<int> scale_frame_buffer_to_aspect(int w, int h, float scale, float aspect) 
   return {static_cast<int>(size.width), static_cast<int>(size.height)};
 }
 
+void update_refresh_period() noexcept {
+  const SDL_DisplayID display = g_window != nullptr ? SDL_GetDisplayForWindow(g_window) : 0;
+  const SDL_DisplayMode* mode = display != 0 ? SDL_GetCurrentDisplayMode(display) : nullptr;
+  uint64_t period = 0;
+  if (mode != nullptr && mode->refresh_rate_numerator > 0 && mode->refresh_rate_denominator > 0) {
+    period = static_cast<uint64_t>(mode->refresh_rate_denominator) * 1'000'000'000ull /
+             static_cast<uint64_t>(mode->refresh_rate_numerator);
+  } else if (mode != nullptr && mode->refresh_rate > 0.f) {
+    period = static_cast<uint64_t>(1e9 / mode->refresh_rate);
+  }
+  g_refreshPeriodNanos.store(period, std::memory_order_relaxed);
+}
+
 void resize_swapchain() noexcept {
+  update_refresh_period();
   const auto size = get_window_size();
   if (size == g_windowSize) {
     return;
@@ -389,6 +404,14 @@ void process_event(SDL_Event& event) {
     if (is_alt_enter_event(event)) {
       set_display_mode(get_fullscreen() ? AURORA_DISPLAY_MODE_WINDOWED : AURORA_DISPLAY_MODE_BORDERLESS);
       g_nativeResizePending.store(true, std::memory_order_release);
+    }
+    break;
+  case SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED:
+    update_refresh_period();
+    break;
+  case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
+    if (primaryWindow) {
+      update_refresh_period();
     }
     break;
   case SDL_EVENT_WINDOW_MOVED: {
@@ -589,6 +612,7 @@ bool create_window(AuroraBackend backend) {
     return false;
   }
   SDL_SetWindowMinimumSize(g_window, 640, 480);
+  update_refresh_period();
   g_displayMode.store(g_config.startFullscreen ? AURORA_DISPLAY_MODE_BORDERLESS : AURORA_DISPLAY_MODE_WINDOWED,
                       std::memory_order_release);
 #if defined(_WIN32)
@@ -864,6 +888,8 @@ void set_display_mode(AuroraDisplayMode mode) {
 }
 
 AuroraDisplayMode get_display_mode() { return g_displayMode.load(std::memory_order_acquire); }
+
+uint64_t refresh_period_nanos() noexcept { return g_refreshPeriodNanos.load(std::memory_order_relaxed); }
 
 void set_window_size(uint32_t width, uint32_t height) {
   TRY_WARN(SDL_RestoreWindow(g_window), "Failed to un-maximize window: {}", SDL_GetError());

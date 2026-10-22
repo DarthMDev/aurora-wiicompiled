@@ -19,6 +19,14 @@ struct Schedule {
 Schedule present_schedule() noexcept;
 bool producer_paced() noexcept;
 
+// Paces presents in blocking present modes to the display refresh so surplus frames are dropped
+// instead of stalling the producer. Render worker only.
+bool admit_display_present(uint64_t atNanos) noexcept;
+// Reports how long acquiring and presenting the surface blocked.
+void report_display_present_wait(uint64_t waitNanos) noexcept;
+// Whether the display refreshes fast enough to show frames between native frames `intervalNanos` apart.
+bool display_shows_interpolation(uint64_t intervalNanos) noexcept;
+
 // steady_clock time in nanoseconds, the clock present schedules are expressed in.
 uint64_t now_nanos() noexcept;
 // Blocks until `deadlineNanos` with sub-millisecond precision; 0 returns immediately.

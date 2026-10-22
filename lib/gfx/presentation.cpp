@@ -4,6 +4,7 @@
 #include "resources.hpp"
 #include "../gx/frame_interpolation.hpp"
 #include "../internal.hpp"
+#include "../window.hpp"
 
 #include <aurora/aurora.h>
 #include <dolphin/gx/GXAurora.h>
@@ -42,7 +43,14 @@ uint64_t g_totalPresentCount = 0;
 
 std::atomic_uint64_t g_scheduleBaseNanos = 0;
 std::atomic_uint64_t g_scheduleIntervalNanos = 0;
+std::atomic_uint64_t g_nativeIntervalNanos = 0;
 std::atomic_bool g_producerPaced = true;
+
+// Display present budget in refresh periods. The cap and the admit threshold absorb frame jitter.
+constexpr double MaxDisplayCredit = 2.0;
+constexpr double AdmitDisplayCredit = 0.75;
+double g_displayCredit = MaxDisplayCredit;
+uint64_t g_displayCreditAt = 0;
 
 std::atomic<AuroraGuestWriteGenerationCallback> g_guestWriteGeneration = nullptr;
 std::atomic<AuroraGuestWriteNotifyCallback> g_guestWriteNotify = nullptr;
@@ -118,6 +126,37 @@ Schedule present_schedule() noexcept {
       .baseNanos = g_scheduleBaseNanos.load(std::memory_order_acquire),
       .intervalNanos = g_scheduleIntervalNanos.load(std::memory_order_acquire),
   };
+}
+
+bool admit_display_present(uint64_t atNanos) noexcept {
+  const uint64_t period = window::refresh_period_nanos();
+  if (period == 0) {
+    return true;
+  }
+  if (g_displayCreditAt != 0 && atNanos > g_displayCreditAt) {
+    g_displayCredit += static_cast<double>(atNanos - g_displayCreditAt) / static_cast<double>(period);
+  }
+  g_displayCreditAt = std::max(g_displayCreditAt, atNanos);
+  g_displayCredit = std::min(g_displayCredit, MaxDisplayCredit);
+  if (g_displayCredit < AdmitDisplayCredit) {
+    return false;
+  }
+  g_displayCredit -= 1.0;
+  return true;
+}
+
+void report_display_present_wait(uint64_t waitNanos) noexcept {
+  // A present that waited for a vblank means the display queue is full.
+  const uint64_t period = window::refresh_period_nanos();
+  if (period != 0 && waitNanos > period / 2) {
+    // Hold off for a full period before the next admit.
+    g_displayCredit = std::min(g_displayCredit, AdmitDisplayCredit - 1.0);
+  }
+}
+
+bool display_shows_interpolation(uint64_t intervalNanos) noexcept {
+  const uint64_t period = window::refresh_period_nanos();
+  return period == 0 || intervalNanos == 0 || period * 20 < intervalNanos * 19;
 }
 
 bool producer_paced() noexcept { return g_producerPaced.load(std::memory_order_acquire); }
@@ -205,6 +244,14 @@ void aurora_set_present_schedule(uint64_t baseNanos, uint64_t intervalNanos) {
   using namespace aurora::gfx::presentation;
   g_scheduleBaseNanos.store(baseNanos, std::memory_order_release);
   g_scheduleIntervalNanos.store(intervalNanos, std::memory_order_release);
+  if (intervalNanos != 0) {
+    g_nativeIntervalNanos.store(intervalNanos, std::memory_order_relaxed);
+  }
+}
+
+bool aurora_display_shows_interpolation() {
+  using namespace aurora::gfx::presentation;
+  return display_shows_interpolation(g_nativeIntervalNanos.load(std::memory_order_relaxed));
 }
 
 void aurora_report_producer_paced(bool paced) {

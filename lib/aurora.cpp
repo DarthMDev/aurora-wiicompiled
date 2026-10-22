@@ -415,10 +415,10 @@ void end_frame_gx(imgui::DrawData imguiDrawData) noexcept {
                   imguiDrawData = std::move(imguiDrawData)](
                      wgpu::CommandEncoder& encoder, std::vector<gfx::AfterSubmitCallback> afterSubmitCallbacks,
                      const gfx::InterpolationReplay& replay) {
-    const auto present = [&](wgpu::CommandEncoder& encoder, bool finalPresent) {
-      const auto presentMode = webgpu::g_graphicsConfig.surfaceConfiguration.presentMode;
-
-      if (presentMode == wgpu::PresentMode::Fifo || presentMode == wgpu::PresentMode::FifoRelaxed) {
+    const auto presentMode = webgpu::g_graphicsConfig.surfaceConfiguration.presentMode;
+    const bool blockingPresent = presentMode == wgpu::PresentMode::Fifo || presentMode == wgpu::PresentMode::FifoRelaxed;
+    const auto present = [&](wgpu::CommandEncoder& encoder, bool finalPresent, bool show) {
+      if (show && blockingPresent) {
         const wgpu::CommandBufferDescriptor sceneDescriptor{.label = "Scene command buffer"};
         const auto sceneCommands = encoder.Finish(&sceneDescriptor);
         g_queue.Submit(1, &sceneCommands);
@@ -430,13 +430,16 @@ void end_frame_gx(imgui::DrawData imguiDrawData) noexcept {
       wgpu::Texture currentTexture;
       wgpu::TextureView currentView;
       auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
-      {
+      uint64_t surfaceWaitNanos = 0;
+      if (show) {
         window::SurfaceLock surfaceLock;
 
         if (window::is_presentable() && g_surface) {
           ZoneScopedN("Acquire texture");
           wgpu::SurfaceTexture surfaceTexture;
+          const uint64_t acquireStart = gfx::presentation::now_nanos();
           g_surface.GetCurrentTexture(&surfaceTexture);
+          surfaceWaitNanos = gfx::presentation::now_nanos() - acquireStart;
           surfaceStatus = surfaceTexture.status;
 
           if (surfaceStatus == wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal) {
@@ -523,7 +526,7 @@ void end_frame_gx(imgui::DrawData imguiDrawData) noexcept {
           imgui::render(pass, imguiDrawData);
           pass.End();
         }
-      } else {
+      } else if (show) {
         Log.info("Skipping present; window not presentable");
       }
 
@@ -547,8 +550,13 @@ void end_frame_gx(imgui::DrawData imguiDrawData) noexcept {
           window::SurfaceLock surfaceLock;
 
           if (window::is_presentable()) {
+            const uint64_t presentStart = gfx::presentation::now_nanos();
             status = g_surface.Present();
+            surfaceWaitNanos += gfx::presentation::now_nanos() - presentStart;
           }
+        }
+        if (blockingPresent) {
+          gfx::presentation::report_display_present_wait(surfaceWaitNanos);
         }
 
         if (status) {
@@ -558,7 +566,7 @@ void end_frame_gx(imgui::DrawData imguiDrawData) noexcept {
           Log.warn("Surface present failed");
           webgpu::release_surface();
         }
-      } else if (g_surface) {
+      } else if (show && g_surface) {
         switch (surfaceStatus) {
         case wgpu::SurfaceGetCurrentTextureStatus::Timeout:
           Log.warn("Surface texture acquisition timed out");
@@ -590,25 +598,35 @@ void end_frame_gx(imgui::DrawData imguiDrawData) noexcept {
 
     // Interpolated slots replay the frame with blended transforms and present between frames:
     // slot k of N+1 goes out at base + k * interval / (N + 1), the native frame last.
-    const uint32_t groupSize = replay.slots + 1;
+    // A display no faster than the native frame rate cannot show them, so present native frames right away.
+    const uint32_t slots =
+        gfx::presentation::display_shows_interpolation(schedule.intervalNanos) ? replay.slots : 0;
+    const uint32_t groupSize = slots + 1;
     const auto deadline = [&](uint32_t slot) -> uint64_t {
-      return replay.slots != 0 && schedule.baseNanos != 0 && schedule.intervalNanos != 0
+      return slots != 0 && schedule.baseNanos != 0 && schedule.intervalNanos != 0
                  ? schedule.baseNanos + schedule.intervalNanos * slot / groupSize
                  : 0;
     };
-    for (uint32_t slot = 0; slot < replay.slots; ++slot) {
+    const auto admit = [&](uint64_t presentAt) {
+      return !blockingPresent ||
+             gfx::presentation::admit_display_present(std::max(presentAt, gfx::presentation::now_nanos()));
+    };
+    for (uint32_t slot = 0; slot < slots; ++slot) {
       // A slot that would only show after the next one is due adds latency without motion.
       if (const uint64_t next = deadline(slot + 1); next != 0 && gfx::presentation::now_nanos() >= next) {
+        continue;
+      }
+      if (!admit(deadline(slot))) {
         continue;
       }
       const wgpu::CommandEncoderDescriptor slotDescriptor{.label = "Interpolated frame encoder"};
       auto slotEncoder = g_device.CreateCommandEncoder(&slotDescriptor);
       replay.encode(slotEncoder, slot);
       gfx::presentation::wait_until(deadline(slot));
-      present(slotEncoder, false);
+      present(slotEncoder, false, true);
     }
-    gfx::presentation::wait_until(deadline(replay.slots));
-    present(encoder, true);
+    gfx::presentation::wait_until(deadline(slots));
+    present(encoder, true, admit(deadline(slots)));
 
     for (auto& callback : afterSubmitCallbacks) {
       if (callback) {
@@ -706,6 +724,11 @@ void aurora_set_pause_on_focus_lost(bool value) { aurora::g_config.pauseOnFocusL
 void aurora_set_display_mode(AuroraDisplayMode mode) { aurora::window::set_display_mode(mode); }
 
 AuroraDisplayMode aurora_get_display_mode() { return aurora::window::get_display_mode(); }
+
+double aurora_get_display_refresh_rate() {
+  const uint64_t period = aurora::window::refresh_period_nanos();
+  return period != 0 ? 1e9 / static_cast<double>(period) : 0.0;
+}
 
 #if !defined(__APPLE__)
 void aurora_set_metalfx_spatial(bool) {}
