@@ -1054,40 +1054,51 @@ void handle_cp(u8 addr, u32 value) noexcept {
     }                                                                                                                  \
   } while (0)
 
-bool copy_xf_data(u32 addr, const u8* data, u32 len, std::endian e) noexcept {
-  if (addr < 0x78) {
-    // Position matrices (0x0000-0x0077)
-    u32 mtxIdx = addr / 12;
-    u32 startOffset = addr % 12;
-    XF_REQUIRE(mtxIdx < MaxPnMtx, "XF: PosMtx copy oob? Should never happen; mtxIdx={}", mtxIdx);
-    XF_REQUIRE(startOffset == 0 && len == 12, "XF: PosMtx sub-copy unsupported: offs={}, len={}", startOffset, len);
-    f32* flat = reinterpret_cast<f32*>(&g_gxState.pnMtx[mtxIdx].pos);
-    bool changed = false;
-    for (u32 i = 0; i < len; i++) {
-      changed |= store_xf_f32(flat[i], read_bits<u32>(data + i * 4, e));
-    }
-    if (changed) {
-      g_gxState.dirty |= DirtyUniform;
-    }
+// XF memory is linear: a load may start anywhere inside a matrix and run across matrices.
+static bool store_xf_matrix_word(u32 addr, u32 bits, bool& changed) noexcept {
+  if (addr < 0x078) {
+    f32* flat = reinterpret_cast<f32*>(&g_gxState.pnMtx[addr / 12].pos);
+    changed |= store_xf_f32(flat[addr % 12], bits);
     return true;
   }
   if (addr < 0x0F0) {
-    // Texture matrices (0x078-0x0EF)
-    u32 texBase = addr - 0x078;
-    u32 mtxIdx = texBase / 12;
-    u32 startOffset = texBase % 12;
-    XF_REQUIRE(mtxIdx < MaxTexMtx, "XF TexMtx copy oob? Should never happen; mtxIdx={}", mtxIdx);
-    XF_REQUIRE(startOffset == 0 && (len == 8 || len == 12), "XF TexMtx sub-copy unsupported: offs={}, len={}", startOffset,
-          len);
+    const u32 offs = addr - 0x078;
+    f32* flat = reinterpret_cast<f32*>(&g_gxState.texMtxs[offs / 12]);
+    changed |= store_xf_f32(flat[offs % 12], bits);
+    return true;
+  }
+  if (addr >= 0x400 && addr < 0x45A) {
+    // 3x3 source packed into 3x4 storage
+    const u32 offs = addr - 0x400;
+    const u32 elem = offs % 9;
+    f32* flat = reinterpret_cast<f32*>(&g_gxState.pnMtx[offs / 9].nrm);
+    changed |= store_xf_f32(flat[(elem / 3) * 4 + elem % 3], bits);
+    return true;
+  }
+  if (addr >= 0x500 && addr < 0x5F0) {
+    const u32 offs = addr - 0x500;
+    f32* flat = reinterpret_cast<f32*>(&g_gxState.ptTexMtxs[offs / 12]);
+    changed |= store_xf_f32(flat[offs % 12], bits);
+    return true;
+  }
+  return false;
+}
 
-    f32* flat = reinterpret_cast<f32*>(&g_gxState.texMtxs[mtxIdx]);
+static bool is_xf_matrix_addr(u32 addr) noexcept {
+  return addr < 0x0F0 || (addr >= 0x400 && addr < 0x45A) || (addr >= 0x500 && addr < 0x5F0);
+}
+
+bool copy_xf_data(u32 addr, const u8* data, u32 len, std::endian e) noexcept {
+  if (is_xf_matrix_addr(addr)) {
     bool changed = false;
+    bool stored = true;
     for (u32 i = 0; i < len; i++) {
-      changed |= store_xf_f32(flat[i], read_bits<u32>(data + i * 4, e));
+      stored &= store_xf_matrix_word(addr + i, read_bits<u32>(data + i * 4, e), changed);
     }
     if (changed) {
       g_gxState.dirty |= DirtyUniform;
     }
+    XF_REQUIRE(stored, "XF: matrix copy leaves matrix memory: addr={:#x}, len={}", addr, len);
     return true;
   }
   // GX_IDENTITY is synthesized by the shader; identity writes are harmless.
@@ -1097,43 +1108,6 @@ bool copy_xf_data(u32 addr, const u8* data, u32 len, std::endian e) noexcept {
       if (read_bits<u32>(data + i * 4, e) != expected) {
         return false;
       }
-    }
-    return true;
-  }
-  if (addr >= 0x400 && addr < 0x45A) {
-    // Normal matrices (0x400-0x459)
-    u32 nrmBase = addr - 0x400;
-    u32 mtxIdx = nrmBase / 9;
-    u32 startOffset = nrmBase % 9;
-    XF_REQUIRE(mtxIdx < MaxPnMtx, "XF: NrmMtx copy oob? Should never happen; mtxIdx={}", mtxIdx);
-    XF_REQUIRE(startOffset == 0 && len == 9, "XF: NrmMtx sub-copy unsupported: offs={}, len={}", startOffset, len);
-    f32* flat = reinterpret_cast<f32*>(&g_gxState.pnMtx[mtxIdx].nrm);
-    bool changed = false;
-    for (u32 i = 0; i < len; i++) {
-      // 3x3 source packed into 3x4 storage
-      u32 row = i / 3;
-      u32 col = i % 3;
-      changed |= store_xf_f32(flat[row * 4 + col], read_bits<u32>(data + i * 4, e));
-    }
-    if (changed) {
-      g_gxState.dirty |= DirtyUniform;
-    }
-    return true;
-  }
-  if (addr >= 0x500 && addr < 0x5F0) {
-    // Post-transform texture matrices (0x500-0x5EF)
-    u32 ptBase = addr - 0x500;
-    u32 mtxIdx = ptBase / 12;
-    u32 startOffset = ptBase % 12;
-    XF_REQUIRE(mtxIdx < MaxPTTexMtx, "XF: PTTexMtx copy oob? Should never happen; mtxIdx={}", mtxIdx);
-    XF_REQUIRE(startOffset == 0 && len == 12, "XF: PTTexMtx sub-copy unsupported: offs={}, len={}", startOffset, len);
-    f32* flat = reinterpret_cast<f32*>(&g_gxState.ptTexMtxs[mtxIdx]);
-    bool changed = false;
-    for (u32 i = 0; i < len; i++) {
-      changed |= store_xf_f32(flat[i], read_bits<u32>(data + i * 4, e));
-    }
-    if (changed) {
-      g_gxState.dirty |= DirtyUniform;
     }
     return true;
   }
